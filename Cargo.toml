@@ -1,0 +1,11 @@
+[package]
+name = "retinue"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mark-ik/retinue"
+description = "An endpoint-scoped implementation of the Reticulum protocol: identity, announces, links, and resources for embedding, not routing. Early reservation; the protocol is public domain, and this is not the reference implementation (reticulum.network)."
+keywords = ["reticulum", "mesh", "networking", "p2p", "off-grid"]
+categories = ["network-programming"]
+
+[dependencies]
