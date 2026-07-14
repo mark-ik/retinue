@@ -65,6 +65,8 @@ pub enum Error {
     BadLinkMode,
     /// A proof decoder was handed a packet that is not a proof.
     NotAProof,
+    /// An accept was handed a packet that is not a link request.
+    NotALinkRequest,
     /// A proof was addressed to a different link than the one it is being matched against.
     LinkMismatch,
 }
@@ -81,6 +83,7 @@ impl core::fmt::Display for Error {
             Self::NotAnAnnounce => "packet is not an announce",
             Self::BadLinkMode => "unknown link cipher mode",
             Self::NotAProof => "packet is not a proof",
+            Self::NotALinkRequest => "packet is not a link request",
             Self::LinkMismatch => "proof is for a different link",
         };
         f.write_str(s)

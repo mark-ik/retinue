@@ -1,13 +1,13 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-13):** **R0, R1, and R3's establishment + channel are done, all
-verified against the oracle.** retinue holds an identity, builds and validates
-announces (ratcheted and not), frames HDLC, exchanges announces with a real RNS
-1.3.8 over live TCP both ways, and **establishes an encrypted link with RNS and
-exchanges application bytes both ways over it**. 36 tests green, plus two live
-mixed-runtime interop gates that pass. The R3 crypto unknowns are all settled by
-capture. Remaining: the R3 responder side, keepalive/teardown on receipt, then R2
-(announce cadence and address book) and R5 (fix mere onto retinue).
+**Status (2026-07-13):** **R0, R1, and R3 are done, all verified against the
+oracle.** retinue holds an identity, builds and validates announces (ratcheted and
+not), frames HDLC, exchanges announces with a real RNS 1.3.8 over live TCP both
+ways, and is a **full encrypted-link peer in both roles**: it initiates and accepts
+links, exchanges application bytes both ways, and handles keepalive and teardown.
+38 tests green, plus three live mixed-runtime interop gates that pass. Remaining for
+v0: R2 (announce cadence and address book), R4 (resources), and R5 (fix mere onto
+retinue). R3 request/response is a small deferred follow-on.
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -100,9 +100,17 @@ mapping, bilateral streams).
     touch the link channel. RTT (context `0xfe`) moves the link to active on the
     peer.
 
-  Still to finish R3 fully: the responder side (retinue accepting an inbound link
-  and proving it), keepalive/teardown handling on receipt, and request/response.
-  Establishment and the data channel, the load-bearing unknowns, are done.
+  **Responder side DONE 2026-07-13.** `link::accept` proves an inbound request, and
+  `Link::receive` classifies inbound traffic (data, RTT, keepalive request/response,
+  close). The responder gate passes (`oracle/interop_link_responder.py`): RNS
+  initiates a link to retinue, retinue proves it (RNS validates the proof and
+  establishes, confirming retinue's signing and derivation), they exchange encrypted
+  bytes both ways, a keepalive round-trips, and retinue recognises the teardown.
+
+  R3 is functionally complete for a link peer: both roles, encrypted channel both
+  ways, keepalive, teardown. The one listed item deferred is RNS-style
+  request/response (contexts `0x09`/`0x0a`), a thin protocol over links that sits
+  closer to the application than the wire; it carries no unknown wire facts.
 - **R4 — resources.** The resource transfer mechanism over links (segmented
   large payloads, progress, cancellation).
   Done when: a multi-megabyte resource round-trips retinue ↔ oracle intact in

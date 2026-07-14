@@ -287,6 +287,99 @@ impl PendingLink {
     }
 }
 
+/// Accept an inbound link request and produce the proof.
+///
+/// This is the responder mirror of [`PendingLink`]. The destination signs the proof with
+/// its long-term identity (so the initiator, which learned that identity from an announce,
+/// can bind the ephemeral key to it), and contributes a fresh ephemeral X25519 key for the
+/// exchange. Returns the established [`Link`] and the proof packet to send back.
+///
+/// `ephemeral_seed` is a fresh 64-byte keypair seed supplied by the caller; only its
+/// X25519 half is used here. `offered` is the mode and MTU to advertise, capped by the
+/// caller against the request if it wants to honour the initiator's proposal.
+pub fn accept(
+    request: &Packet,
+    destination: &PrivateIdentity,
+    ephemeral_seed: &[u8; 64],
+    offered: LinkTrailer,
+) -> Result<(Link, Packet)> {
+    if request.packet_type != PacketType::LinkRequest {
+        return Err(Error::NotALinkRequest);
+    }
+    if request.payload.len() < LINK_KEYS_LEN {
+        return Err(Error::Truncated);
+    }
+
+    let id = link_id(request)?;
+    let peer_eph_x: [u8; KEY_LEN] =
+        request.payload[..KEY_LEN].try_into().expect("checked length");
+
+    let ephemeral = PrivateIdentity::from_secret_bytes(ephemeral_seed);
+    let our_eph_x = *ephemeral.public().x25519_bytes();
+    let trailer = offered.encode();
+
+    // Sign link_id || our_eph_x || our_long_term_ed25519 || trailer with the destination's
+    // identity, exactly as the initiator will reconstruct and verify it.
+    let mut signed = Vec::with_capacity(
+        crate::hash::ADDRESS_HASH_LEN + KEY_LEN + KEY_LEN + TRAILER_LEN,
+    );
+    signed.extend_from_slice(id.as_slice());
+    signed.extend_from_slice(&our_eph_x);
+    signed.extend_from_slice(destination.public().ed25519_bytes());
+    signed.extend_from_slice(&trailer);
+    let signature = destination.sign(&signed);
+
+    let mut payload = Vec::with_capacity(LINK_PROOF_LEN);
+    payload.extend_from_slice(&signature);
+    payload.extend_from_slice(&our_eph_x);
+    payload.extend_from_slice(&trailer);
+
+    let proof = Packet {
+        ifac: false,
+        header_type: HeaderType::Type1,
+        context_flag: false,
+        propagation: Propagation::Broadcast,
+        destination_type: DestinationType::Link,
+        packet_type: PacketType::Proof,
+        hops: 0,
+        transport: None,
+        destination: id,
+        context: CTX_LRPROOF,
+        payload,
+    };
+
+    let shared = ephemeral.diffie_hellman(&XPublicKey::from(peer_eph_x));
+    let keys = DerivedKeys::derive(&shared, id);
+
+    Ok((
+        Link {
+            id,
+            keys,
+            mode: offered.mode,
+            mtu: offered.mtu,
+        },
+        proof,
+    ))
+}
+
+/// What an inbound link-layer packet is, once matched to a link by its id.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Inbound {
+    /// Application data, already decrypted.
+    Data(Vec<u8>),
+    /// The RTT packet that follows a proof. Its contents are not load-bearing.
+    Rtt,
+    /// A keepalive request. Answer it with [`Link::keepalive_packet`] carrying
+    /// [`KEEPALIVE_RESPONSE`].
+    KeepAliveRequest,
+    /// A keepalive response to one we sent.
+    KeepAliveResponse,
+    /// The peer tore the link down.
+    Close,
+    /// Addressed to this link but not a shape we recognise.
+    Unknown,
+}
+
 /// An established link: a shared key and the negotiated parameters.
 ///
 /// The data channel is the R0 token with the link's static key. There is no per-packet
@@ -325,6 +418,31 @@ impl Link {
         self.keys.decrypt(&packet.payload)
     }
 
+    /// Classify an inbound packet addressed to this link.
+    ///
+    /// Returns `None` if the packet is not for this link at all. Otherwise it dispatches on
+    /// the context byte: data and RTT are decrypted, keepalives and closes are recognised
+    /// by their shape.
+    pub fn receive(&self, packet: &Packet) -> Option<Inbound> {
+        if packet.destination != self.id {
+            return None;
+        }
+        Some(match packet.context {
+            0x00 => match self.decrypt(packet) {
+                Ok(data) => Inbound::Data(data),
+                Err(_) => Inbound::Unknown,
+            },
+            CTX_LRRTT => Inbound::Rtt,
+            CTX_KEEPALIVE => match packet.payload.first().copied() {
+                Some(KEEPALIVE_REQUEST) => Inbound::KeepAliveRequest,
+                Some(KEEPALIVE_RESPONSE) => Inbound::KeepAliveResponse,
+                _ => Inbound::Unknown,
+            },
+            CTX_LINKCLOSE => Inbound::Close,
+            _ => Inbound::Unknown,
+        })
+    }
+
     /// The RTT packet the initiator sends after a proof, which moves the link to active on
     /// the peer. RNS expects a msgpack-encoded float; the exact value is not load-bearing.
     pub fn rtt_packet(&self, rtt_seconds: f32, iv: &[u8; IV_LEN]) -> Packet {
@@ -350,6 +468,7 @@ impl Link {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::destination::DestinationName;
 
     fn request(dest_hex: &str, payload_hex: &str) -> Packet {
         let mut dest = [0u8; 16];
@@ -432,5 +551,76 @@ mod tests {
     fn a_short_payload_is_an_error() {
         let p = request("a8725a7e212dace39e9f99a8ac5da28c", "0faa");
         assert!(link_id(&p).is_err());
+    }
+
+    /// Initiator and responder, both retinue, must agree on the link id and the session
+    /// key, and then talk. This checks the two sides are mutually consistent; the oracle
+    /// gates check each side against RNS.
+    #[test]
+    fn initiator_and_responder_agree() {
+        let dest_identity = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let peer = *dest_identity.public();
+        let dest_hash =
+            DestinationName::new("retinue", ["test"]).destination_hash(&peer);
+
+        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+
+        // Initiator opens.
+        let (pending, request) =
+            PendingLink::open(dest_hash, peer, &[0x33; 64], trailer);
+
+        // Responder accepts and proves.
+        let (responder_link, proof) =
+            accept(&request, &dest_identity, &[0x99; 64], trailer).unwrap();
+
+        // Initiator verifies the proof and establishes.
+        let initiator_link = pending.prove(&proof).unwrap();
+
+        assert_eq!(initiator_link.id(), responder_link.id());
+        assert_eq!(initiator_link.id(), pending.link_id());
+
+        // The shared key round-trips: what one encrypts, the other decrypts.
+        let msg = b"across the link";
+        let packet = initiator_link.data_packet(msg, &[0x01; 16]);
+        assert_eq!(responder_link.receive(&packet), Some(Inbound::Data(msg.to_vec())));
+
+        let back = responder_link.data_packet(b"and back", &[0x02; 16]);
+        assert_eq!(
+            initiator_link.receive(&back),
+            Some(Inbound::Data(b"and back".to_vec())),
+        );
+    }
+
+    #[test]
+    fn receive_classifies_link_traffic() {
+        let dest_identity = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let (_pending, request) = PendingLink::open(
+            DestinationName::new("retinue", ["test"]).destination_hash(dest_identity.public()),
+            *dest_identity.public(),
+            &[0x33; 64],
+            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        );
+        let (link, _proof) = accept(
+            &request,
+            &dest_identity,
+            &[0x99; 64],
+            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        )
+        .unwrap();
+
+        assert_eq!(
+            link.receive(&link.keepalive_packet(KEEPALIVE_REQUEST)),
+            Some(Inbound::KeepAliveRequest),
+        );
+        assert_eq!(
+            link.receive(&link.keepalive_packet(KEEPALIVE_RESPONSE)),
+            Some(Inbound::KeepAliveResponse),
+        );
+        assert_eq!(link.receive(&link.close_packet()), Some(Inbound::Close));
+
+        // A packet for a different link id is not ours.
+        let mut foreign = link.keepalive_packet(KEEPALIVE_REQUEST);
+        foreign.destination = AddressHash::from_bytes([0xAB; 16]);
+        assert_eq!(link.receive(&foreign), None);
     }
 }
