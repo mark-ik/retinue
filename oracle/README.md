@@ -71,10 +71,31 @@ is a silent, total wire incompatibility.
   feature.
 - **`NAME_HASH_LENGTH` is 10 bytes**, which appears nowhere in the manual.
 
+## The live interop gate
+
+```sh
+./.venv/Scripts/python.exe -u interop_r1.py
+```
+
+The R1 done-condition, and the only test that proves we are actually wire-compatible.
+It starts retinue (`examples/interop_tcp.rs`), points a real RNS `TCPClientInterface`
+at it, and checks **both** directions:
+
+- **retinue -> RNS.** RNS's own announce handler accepts an announce retinue built,
+  signed and framed. Reaching the handler at all means it passed RNS's signature
+  validation.
+- **RNS -> retinue.** retinue de-frames, decodes and validates RNS's announce over the
+  same socket.
+
+Either direction failing means we are not wire-compatible, whatever the unit tests say.
+This is a **local gate**, not CI: CI replays the committed fixtures instead.
+
 ## Files
 
 | file | what |
-|---|---|
+| --- | --- |
 | `requirements.txt` | the pin: `rns==1.3.8` |
-| `capture.py` | the capture rig |
+| `capture.py` | R0 fixtures: identity vector, announces, negatives, a token |
+| `capture_tcp.py` | R1 fixtures: the raw TCP stream, and the framing rules |
+| `interop_r1.py` | the live two-way interop gate |
 | `.venv/` | gitignored |

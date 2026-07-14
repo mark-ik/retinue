@@ -1,0 +1,21 @@
+{
+  "rns_version": "1.3.8",
+  "description": "Raw TCP-interface bytes from RNS 1.3.8, recorded by a socket that speaks nothing. tcp_stream.bin is the wire stream including framing; tcp_frame_announce.bin is one de-framed packet from it.",
+  "framing": {
+    "scheme": "HDLC",
+    "flag": "0x7E",
+    "escape": "0x7D",
+    "escape_mask": "0x20 (escaped byte is XORed with 0x20)",
+    "confirmed": true,
+    "escapes_flag_byte": true,
+    "escapes_escape_byte": true,
+    "how": "De-framed the recorded stream and handed the result back to RNS.Identity.validate_announce, which accepted it. The escape rules were then confirmed by announcing app_data containing both 0x7E and 0x7D and reading the escaping off the wire."
+  },
+  "stream_len": 568,
+  "frame_lens": [
+    195,
+    185,
+    173
+  ],
+  "bytes_before_announce": 198
+}

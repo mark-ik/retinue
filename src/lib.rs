@@ -7,13 +7,16 @@
 //!
 //! # Status
 //!
-//! R0: the wire vocabulary. Identities, hashes, destination naming, the packet codec,
-//! announces, and the encrypted token. No I/O, no runtime, no RNG: everything here is a
-//! pure function over bytes, which is what lets it be replayed against fixtures captured
-//! from the reference implementation.
+//! **R0, the wire vocabulary**: identities, hashes, destination naming, the packet codec,
+//! announces, and the encrypted token. No I/O, no runtime, no RNG. Everything is a pure
+//! function over bytes, which is what lets it be replayed against fixtures captured from
+//! the reference implementation.
 //!
-//! The interfaces, links, and resources of R1 onward will sit on top of this in a tokio
-//! shell.
+//! **R1, the TCP interface**: HDLC framing ([`iface::hdlc`], also sans-io) and a tokio
+//! shell over it ([`iface::tcp`]). The shell is behind the `tokio` feature, on by default;
+//! turn it off and the codec still stands alone.
+//!
+//! Links and resources (R3, R4) will sit on top.
 //!
 //! # Provenance
 //!
@@ -28,6 +31,7 @@ pub mod announce;
 pub mod destination;
 pub mod hash;
 pub mod identity;
+pub mod iface;
 pub mod packet;
 pub mod token;
 

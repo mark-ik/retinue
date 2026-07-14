@@ -1,11 +1,11 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-13):** **R0 is done and verified against the oracle.** The wire
-module (identity, hashing, destination naming, packet codec, announces, token) is
-implemented and 20 tests pass, including the one that matters: retinue's announces
-are byte-identical to RNS 1.3.8's from the same inputs, ratcheted and not, and
-retinue decrypts tokens RNS encrypted to it. The oracle harness exists and its
-fixtures are committed. Next: R1, the TCP interface.
+**Status (2026-07-13):** **R0 and R1 are done, both verified against the oracle.**
+retinue holds an identity, builds and validates announces (ratcheted and not),
+speaks the encrypted token, frames HDLC, and **exchanges announces with a real RNS
+1.3.8 over a live TCP connection in both directions**. 29 tests green, plus a live
+mixed-runtime interop gate that passes. Next: R2 (announce cadence and the address
+book) and R3 (links), which is where the remaining unknowns live.
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -59,10 +59,17 @@ mapping, bilateral streams).
   ones), retinue decrypts tokens RNS encrypted to it, and retinue rejects all six
   corrupted-announce fixtures. Fixtures committed under `tests/fixtures/`, so CI
   needs no Python.
-- **R1 — TCP interface.** The RNS TCP interface framing, client and server
-  sides, connected to R0's packet layer.
-  Done when: retinue and the oracle exchange announces over a live TCP
-  connection in both directions.
+- **R1 — TCP interface. DONE 2026-07-13.** HDLC framing (sans-io, in
+  `iface::hdlc`) and a tokio shell over it (`iface::tcp`, behind the default
+  `tokio` feature; turn it off and the codec still stands alone).
+  Done: the live gate passes. `oracle/interop_r1.py` stands up a real RNS with a
+  `TCPClientInterface` pointed at retinue and checks both directions. **RNS
+  accepts an announce retinue built, signed and framed** (its own signature
+  validation, its own announce handler, app_data intact), and retinue de-frames,
+  decodes and validates RNS's announce over the same socket. The framing itself
+  was captured, not assumed: `0x7E` flag, `0x7D` escape, XOR `0x20`, and *both*
+  special bytes escaped, which was settled by announcing `app_data` full of them
+  and reading the wire.
 - **R2 — endpoint announce/path behavior.** Announce emission cadence,
   receipt, address-book resolution, path requests to the degree an endpoint
   needs them (reaching peers beyond one hop through RNS transport nodes).
@@ -254,22 +261,23 @@ owned handle with its own I/O, per the note above.
 
 ## Next actions
 
-R0's three actions are done. R1 (the TCP interface) is next, and the shape of it
-is already clear:
+R0 and R1 are done. Next:
 
-1. **Capture the framing before writing it.** Point the oracle's
-   `TCPClientInterface` at a socket that records every byte, and read the framing
-   off the wire rather than trusting Beechat's `iface/hdlc.rs`. Beechat has now
-   been wrong twice about things only capture could settle, so it gets no benefit
-   of the doubt on framing either.
-2. **Then the interface itself**, in the tokio shell: HDLC framing over a TCP
-   client and server, feeding decoded packets into R0's codec.
-3. **Then capture a live link handshake**, which is what unblocks R3 and settles
-   the AES-mode and MTU-trailer questions above.
+1. **Capture a live link handshake.** This unblocks R3 and settles the two live
+   unknowns above: whether a link request carries the 3-byte MTU/mode trailer, and
+   how the link id is computed (over the full request data, or only the 64 bytes of
+   keys). A wrong guess on either means no link ever completes, with no useful
+   error. Drive an `RNS.Link` against a retinue destination over the R1 interface
+   and record every packet in both directions.
+2. **R2, the endpoint behaviour**: announce cadence, the address book, and path
+   requests to the degree an endpoint needs them.
+3. **R3, links**, against the captured handshake.
 
-A note on sequencing that R0 vindicated: the temptation is to write the code and
-capture later. Capture first. Both times the paper research and the readable Rust
-implementation agreed with each other, and both times they were wrong.
+The sequencing lesson, now vindicated twice: **capture before coding.** On the
+announce ratchet, on the token key split, and on the framing escape rules, the
+paper research and the readable Rust implementation agreed with each other, and on
+the first two they were both wrong. Only bytes settled it. The framing turned out
+fine, but it was checked, not trusted, and that cost about twenty minutes.
 
 ## Progress
 
@@ -305,3 +313,22 @@ implementation agreed with each other, and both times they were wrong.
   Also confirmed by known-answer test: RNS, Beechat and retinue all agree that
   `example_utilities.announcesample.fruits` under the fixture identity hashes to
   `2419dca3c93718497b91990373df1503`.
+
+- **2026-07-13 (same day) — R1 landed.** HDLC framing plus a tokio TCP interface.
+  Framing captured first, per the R0 lesson (`oracle/capture_tcp.py` records a
+  socket that speaks nothing while RNS talks at it): flag `0x7E`, escape `0x7D`,
+  XOR `0x20`. The capture handed us the flag-escape case for free, because the
+  fixture destination hash happens to contain a literal `0x7E` and RNS stuffed it
+  to `7d 5e`. The escape-byte rule was then pinned deliberately, by announcing
+  `app_data` of `7e 7d 7e 7d 00 ff` and reading `7d5e 7d5d 7d5e 7d5d 00 ff` off
+  the wire: **both** special bytes are escaped.
+
+  **The live gate passes** (`oracle/interop_r1.py`): a real RNS accepted an
+  announce retinue built, signed and framed, and retinue validated RNS's announce
+  over the same TCP connection. That is genuine two-way wire compatibility with the
+  reference implementation, which is more than the Beechat-based probe in mere has
+  ever demonstrated.
+
+  29 tests green. Framing tests replay the real captured TCP stream, including
+  feeding it back one byte at a time to prove the deframer survives arbitrary TCP
+  chunking.
