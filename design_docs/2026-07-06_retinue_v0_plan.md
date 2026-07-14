@@ -153,11 +153,24 @@ mapping, bilateral streams).
   request → parts → proof, with bz2 compression (`t < d` in the capture) and
   hashmap updates for large resources.
 
-  Not yet implemented, and deliberately sequenced after R5: it is the largest phase
-  (a stateful windowed protocol plus compression), and it is not on R5's path, since
-  mere uses bilateral link streams rather than resources. Done-condition unchanged: a
-  multi-megabyte resource round-trips retinue ↔ oracle intact both ways. Tooling in
-  place: `oracle/capture_resource.py`, `examples/resource_probe.rs`.
+  **Advertisement codec DONE 2026-07-13.** `src/resource.rs` parses and builds the
+  advertisement map, with its own small msgpack map codec (fixmap, uint, int, nil,
+  bin, single-letter str keys). It re-packs the real captured advertisement to the
+  exact bytes, key order included, which is the proof it is faithful.
+
+  **The transfer state machine is not implemented, and it is the bulk of R4.** It
+  needs: the RNS-specific derivations (resource hash, `get_map_hash`, RNS's bz2
+  variant, which differs from stdlib bz2, 720 vs 660 on the captured payload), the
+  windowed request/part/proof exchange (`WINDOW`, `SDU = 464`, `MAPHASH_LEN = 4`,
+  dynamic window sizing, retries, hashmap-exhaustion updates), both directions, and a
+  multi-megabyte round-trip gate. Each sub-format (request, part, proof) needs its own
+  capture, and the RNS resource internals resisted black-box extraction in this
+  session (the introspection harness's establishment callback did not fire reliably).
+  This is a focused multi-step build, not a tail-of-session task.
+
+  Done-condition unchanged: a multi-megabyte resource round-trips retinue ↔ oracle
+  intact both ways. Tooling in place: `oracle/capture_resource.py`,
+  `examples/resource_probe.rs`.
 - **R5 — Mere adoption.** Implement Mere's `Transport` trait on retinue;
   replace the Beechat pin behind the existing feature gate; carry over the
   probe's tests (deterministic seed → destination, announce-bound `PeerID`,

@@ -37,6 +37,7 @@ pub mod link;
 pub mod packet;
 pub mod path;
 pub mod request;
+pub mod resource;
 pub mod token;
 
 pub use address_book::{AddressBook, Peer};
