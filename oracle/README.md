@@ -97,5 +97,17 @@ This is a **local gate**, not CI: CI replays the committed fixtures instead.
 | `requirements.txt` | the pin: `rns==1.3.8` |
 | `capture.py` | R0 fixtures: identity vector, announces, negatives, a token |
 | `capture_tcp.py` | R1 fixtures: the raw TCP stream, and the framing rules |
-| `interop_r1.py` | the live two-way interop gate |
+| `interop_r1.py` | the R1 live two-way announce gate |
+| `capture_link.py` | link handshake probe: the trailer and link-id derivation |
+| `link_crypto_probe.py` | pins the link key derivation by decrypting real RNS link traffic |
+| `capture_link_session.py` | R3 fixtures: a deterministic captured link session |
+| `interop_link.py` | the R3 live encrypted-link gate |
 | `.venv/` | gitignored |
+
+The link-crypto probes are worth a note on method. `link_crypto_probe.py` acts as a link
+initiator with a *fixed* ephemeral secret against a real RNS responder. Because we know our
+own secret and RNS's ephemeral public arrives in the proof, the ECDH shared secret is
+computable, so we can derive the session key ourselves and prove it by having RNS decrypt
+data we encrypted, and by decrypting RNS's reply. That, plus RNS's own
+`Link.link_id_from_lr_packet` / `mode_from_lr_packet` helpers as a cross-check, pinned the
+entire link layer before a line of Rust was written.

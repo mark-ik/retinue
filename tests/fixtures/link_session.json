@@ -1,0 +1,11 @@
+{
+  "description": "A full link session captured from RNS 1.3.8, deterministic from a fixed initiator ephemeral seed. link_proof.bin is RNS's proof; link_rns_data.bin is a link data packet RNS encrypted to us. A Rust test reproduces the derivation and decrypts the reply.",
+  "rns_version": "1.3.8",
+  "destination_identity_seed_hex": "f0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6cf0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6c",
+  "destination_ed25519_pub_hex": "84f6da8c37b5f343568b185a20c63b5bf011a3d60ee805bb9e151371ea1d5555",
+  "initiator_ephemeral_seed_hex": "33333333333333333333333333333333333333333333333333333333333333334444444444444444444444444444444444444444444444444444444444444444",
+  "link_request_hex": "0200a8725a7e212dace39e9f99a8ac5da28c007b0d47d93427f8311160781c7c733fd89f88970aef490d8aa0ee19a4cb8a1b14d759793bbc13a2819a827c76adb6fba8a49aee007f49f2d0992d99b825ad2c482001f4",
+  "link_id_hex": "884427832578c7b9f18142069008daae",
+  "requested_trailer_hex": "2001f4",
+  "expected_reply_plaintext": "reply-from-rns-over-the-link"
+}

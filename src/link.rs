@@ -37,8 +37,14 @@
 //! Derived by solving against two independently captured (request, link id) pairs; only
 //! this formula satisfies both. See `oracle/capture_link.py`.
 
+use x25519_dalek::PublicKey as XPublicKey;
+
 use crate::hash::AddressHash;
-use crate::packet::Packet;
+use crate::identity::{Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
+use crate::packet::{
+    DestinationType, HeaderType, Packet, PacketType, Propagation,
+};
+use crate::token::{DerivedKeys, IV_LEN};
 use crate::{Error, Result};
 
 /// Length of the mode/MTU trailer on link requests and proofs.
@@ -51,7 +57,24 @@ pub const LINK_KEYS_LEN: usize = 64;
 pub const LINK_REQUEST_LEN: usize = LINK_KEYS_LEN + TRAILER_LEN;
 
 /// Bytes of a link proof: signature (64), public key (32), and the trailer.
-pub const LINK_PROOF_LEN: usize = 64 + 32 + TRAILER_LEN;
+pub const LINK_PROOF_LEN: usize = SIGNATURE_LEN + KEY_LEN + TRAILER_LEN;
+
+/// Packet context byte for a link request proof.
+pub const CTX_LRPROOF: u8 = 0xff;
+
+/// Packet context byte for the link RTT packet.
+pub const CTX_LRRTT: u8 = 0xfe;
+
+/// Packet context byte for a keepalive.
+pub const CTX_KEEPALIVE: u8 = 0xfa;
+
+/// Packet context byte for a link close.
+pub const CTX_LINKCLOSE: u8 = 0xfc;
+
+/// Keepalive request/response sentinels, carried as the single plaintext byte of a
+/// keepalive packet.
+pub const KEEPALIVE_REQUEST: u8 = 0xff;
+pub const KEEPALIVE_RESPONSE: u8 = 0xfe;
 
 /// The symmetric cipher a link will use. Negotiated, not fixed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,10 +151,205 @@ pub fn link_id(request: &Packet) -> Result<AddressHash> {
     Ok(AddressHash::of(&buf))
 }
 
+/// Build the flag/hops/dest/context prefix and payload of a link-layer packet.
+fn link_packet(context: u8, link_id: AddressHash, payload: Vec<u8>) -> Packet {
+    Packet {
+        ifac: false,
+        header_type: HeaderType::Type1,
+        context_flag: false,
+        propagation: Propagation::Broadcast,
+        destination_type: DestinationType::Link,
+        packet_type: PacketType::Data,
+        hops: 0,
+        transport: None,
+        destination: link_id,
+        context,
+        payload,
+    }
+}
+
+/// An outbound link the initiator has requested but the peer has not yet proved.
+///
+/// Holds the ephemeral secret so the shared key can be derived once the proof arrives. A
+/// `PendingLink` becomes a [`Link`] only through [`prove`](PendingLink::prove), which
+/// verifies the peer's signature first.
+pub struct PendingLink {
+    ephemeral: PrivateIdentity,
+    peer: Identity,
+    link_id: AddressHash,
+    requested: LinkTrailer,
+}
+
+impl PendingLink {
+    /// Start a link to `peer` at `destination`.
+    ///
+    /// `ephemeral` is a fresh 64-byte keypair seed (`x25519_secret(32) ||
+    /// ed25519_seed(32)`), generated per attempt by the caller: R3 stays RNG-free the same
+    /// way R0 does, so this is reproducible and the runtime supplies the randomness.
+    /// Returns the pending link and the request packet to send.
+    pub fn open(
+        destination: AddressHash,
+        peer: Identity,
+        ephemeral_seed: &[u8; 64],
+        requested: LinkTrailer,
+    ) -> (Self, Packet) {
+        let ephemeral = PrivateIdentity::from_secret_bytes(ephemeral_seed);
+
+        let mut payload = Vec::with_capacity(LINK_REQUEST_LEN);
+        payload.extend_from_slice(&ephemeral.public().to_public_bytes());
+        payload.extend_from_slice(&requested.encode());
+
+        let request = Packet {
+            ifac: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            propagation: Propagation::Broadcast,
+            destination_type: DestinationType::Single,
+            packet_type: PacketType::LinkRequest,
+            hops: 0,
+            transport: None,
+            destination,
+            context: 0,
+            payload,
+        };
+
+        let link_id = link_id(&request).expect("request we just built has 64+ payload bytes");
+        (
+            Self {
+                ephemeral,
+                peer,
+                link_id,
+                requested,
+            },
+            request,
+        )
+    }
+
+    /// The link id this attempt will have. Inbound proofs are addressed to it.
+    pub fn link_id(&self) -> AddressHash {
+        self.link_id
+    }
+
+    /// Validate a proof and, if it checks out, produce the established [`Link`].
+    ///
+    /// The proof is `signature(64) || peer_ephemeral_x25519(32) || trailer(3)`. The
+    /// signature covers `link_id || peer_ephemeral_x25519 || peer_identity_ed25519 ||
+    /// trailer`, which binds the ephemeral key to the destination's long-term identity, so
+    /// a third party cannot substitute its own ephemeral key. Verified against RNS 1.3.8.
+    pub fn prove(&self, proof: &Packet) -> Result<Link> {
+        if proof.packet_type != PacketType::Proof {
+            return Err(Error::NotAProof);
+        }
+        if proof.destination != self.link_id {
+            return Err(Error::LinkMismatch);
+        }
+        if proof.payload.len() < SIGNATURE_LEN + KEY_LEN {
+            return Err(Error::Truncated);
+        }
+
+        let signature: [u8; SIGNATURE_LEN] =
+            proof.payload[..SIGNATURE_LEN].try_into().expect("checked length");
+        let peer_eph: [u8; KEY_LEN] = proof.payload[SIGNATURE_LEN..SIGNATURE_LEN + KEY_LEN]
+            .try_into()
+            .expect("checked length");
+        let trailer_bytes = &proof.payload[SIGNATURE_LEN + KEY_LEN..];
+
+        // The signed message ends with the trailer when the proof carries one.
+        let mut signed = Vec::with_capacity(
+            crate::hash::ADDRESS_HASH_LEN + KEY_LEN + KEY_LEN + trailer_bytes.len(),
+        );
+        signed.extend_from_slice(self.link_id.as_slice());
+        signed.extend_from_slice(&peer_eph);
+        signed.extend_from_slice(self.peer.ed25519_bytes());
+        signed.extend_from_slice(trailer_bytes);
+
+        if !self.peer.verify(&signed, &signature) {
+            return Err(Error::BadSignature);
+        }
+
+        // The proof's trailer is authoritative for the negotiated mode and MTU; fall back
+        // to what we requested if the peer sent none.
+        let agreed = if trailer_bytes.len() >= TRAILER_LEN {
+            LinkTrailer::decode(trailer_bytes[..TRAILER_LEN].try_into().expect("len"))?
+        } else {
+            self.requested
+        };
+
+        let shared = self.ephemeral.diffie_hellman(&XPublicKey::from(peer_eph));
+        let keys = DerivedKeys::derive(&shared, self.link_id);
+
+        Ok(Link {
+            id: self.link_id,
+            keys,
+            mode: agreed.mode,
+            mtu: agreed.mtu,
+        })
+    }
+}
+
+/// An established link: a shared key and the negotiated parameters.
+///
+/// The data channel is the R0 token with the link's static key. There is no per-packet
+/// ECDH and no ephemeral prefix, because the forward secrecy already lives in the ephemeral
+/// key exchange that established the link. This is why links carry no ratchet.
+pub struct Link {
+    id: AddressHash,
+    keys: DerivedKeys,
+    mode: LinkMode,
+    mtu: u32,
+}
+
+impl Link {
+    pub fn id(&self) -> AddressHash {
+        self.id
+    }
+
+    pub fn mode(&self) -> LinkMode {
+        self.mode
+    }
+
+    pub fn mtu(&self) -> u32 {
+        self.mtu
+    }
+
+    /// Encrypt application bytes into a link data packet.
+    ///
+    /// `iv` is caller-supplied to keep this reproducible; it must be fresh and
+    /// unpredictable per packet in production.
+    pub fn data_packet(&self, plaintext: &[u8], iv: &[u8; IV_LEN]) -> Packet {
+        link_packet(0x00, self.id, self.keys.encrypt(plaintext, iv))
+    }
+
+    /// Decrypt a link data packet's payload.
+    pub fn decrypt(&self, packet: &Packet) -> Result<Vec<u8>> {
+        self.keys.decrypt(&packet.payload)
+    }
+
+    /// The RTT packet the initiator sends after a proof, which moves the link to active on
+    /// the peer. RNS expects a msgpack-encoded float; the exact value is not load-bearing.
+    pub fn rtt_packet(&self, rtt_seconds: f32, iv: &[u8; IV_LEN]) -> Packet {
+        // msgpack float32: 0xca then big-endian bytes.
+        let mut plain = Vec::with_capacity(5);
+        plain.push(0xca);
+        plain.extend_from_slice(&rtt_seconds.to_be_bytes());
+        link_packet(CTX_LRRTT, self.id, self.keys.encrypt(&plain, iv))
+    }
+
+    /// A keepalive. The peer answers a [`KEEPALIVE_REQUEST`] with a [`KEEPALIVE_RESPONSE`].
+    /// Keepalive bytes are not encrypted; they ride the link by its id alone.
+    pub fn keepalive_packet(&self, sentinel: u8) -> Packet {
+        link_packet(CTX_KEEPALIVE, self.id, vec![sentinel])
+    }
+
+    /// Tear the link down.
+    pub fn close_packet(&self) -> Packet {
+        link_packet(CTX_LINKCLOSE, self.id, self.id.as_slice().to_vec())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet::{DestinationType, HeaderType, PacketType, Propagation};
 
     fn request(dest_hex: &str, payload_hex: &str) -> Packet {
         let mut dest = [0u8; 16];

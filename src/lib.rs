@@ -63,6 +63,10 @@ pub enum Error {
     NotAnAnnounce,
     /// A link trailer named a cipher mode we do not know.
     BadLinkMode,
+    /// A proof decoder was handed a packet that is not a proof.
+    NotAProof,
+    /// A proof was addressed to a different link than the one it is being matched against.
+    LinkMismatch,
 }
 
 impl core::fmt::Display for Error {
@@ -76,6 +80,8 @@ impl core::fmt::Display for Error {
             Self::BadPadding => "malformed padding",
             Self::NotAnAnnounce => "packet is not an announce",
             Self::BadLinkMode => "unknown link cipher mode",
+            Self::NotAProof => "packet is not a proof",
+            Self::LinkMismatch => "proof is for a different link",
         };
         f.write_str(s)
     }

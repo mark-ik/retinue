@@ -1,11 +1,13 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-13):** **R0 and R1 are done, both verified against the oracle.**
-retinue holds an identity, builds and validates announces (ratcheted and not),
-speaks the encrypted token, frames HDLC, and **exchanges announces with a real RNS
-1.3.8 over a live TCP connection in both directions**. 29 tests green, plus a live
-mixed-runtime interop gate that passes. Next: R2 (announce cadence and the address
-book) and R3 (links), which is where the remaining unknowns live.
+**Status (2026-07-13):** **R0, R1, and R3's establishment + channel are done, all
+verified against the oracle.** retinue holds an identity, builds and validates
+announces (ratcheted and not), frames HDLC, exchanges announces with a real RNS
+1.3.8 over live TCP both ways, and **establishes an encrypted link with RNS and
+exchanges application bytes both ways over it**. 36 tests green, plus two live
+mixed-runtime interop gates that pass. The R3 crypto unknowns are all settled by
+capture. Remaining: the R3 responder side, keepalive/teardown on receipt, then R2
+(announce cadence and address book) and R5 (fix mere onto retinue).
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -75,10 +77,32 @@ mapping, bilateral streams).
   needs them (reaching peers beyond one hop through RNS transport nodes).
   Done when: retinue behind an oracle-run transport node can resolve and be
   resolved by a peer two hops away.
-- **R3 — links.** Link establishment, the encrypted channel (including RNS
-  1.x ratchet behavior), keepalives, teardown, request/response.
-  Done when: a bidirectional encrypted stream between retinue and the oracle
-  carries application bytes both ways and survives an idle period.
+- **R3 — links. ESTABLISHMENT + CHANNEL DONE 2026-07-13.** Link establishment
+  (request, proof, key derivation) and the encrypted data channel, in `src/link.rs`.
+  Done: the live gate passes (`oracle/interop_link.py`). retinue's own code opens a
+  link to a real RNS 1.3.8, RNS decrypts application bytes retinue encrypted on the
+  link, retinue decrypts RNS's reply, and the link survives an idle period. Also a
+  deterministic fixture test (`tests/link_session.rs`) reproduces the whole
+  derivation and decrypts captured RNS link data with no Python.
+
+  The crypto was pinned by a known-secret initiator probe before any Rust was
+  written, and this time Beechat's model held up. Key facts:
+  - Request: `ephemeral_x25519(32) || ephemeral_ed25519(32) || trailer(3)`.
+  - Proof: `signature(64) || peer_ephemeral_x25519(32) || trailer(3)`, context
+    `0xff`, signature over `link_id || peer_eph_x || peer_identity_ed25519 ||
+    trailer`. Cross-checked: retinue's link id equals RNS's own
+    `link_id_from_lr_packet`.
+  - Session key: `HKDF-SHA256(ikm = ECDH(ephemerals), salt = link_id, info = empty)`,
+    then the R0 token with **no** ephemeral prefix (static per-link key). It is
+    literally `token::DerivedKeys` with `salt = link_id`.
+  - **Links carry no ratchet.** The forward secrecy already lives in the ephemeral
+    exchange, so the ratchet machinery that breaks Beechat on announces does not
+    touch the link channel. RTT (context `0xfe`) moves the link to active on the
+    peer.
+
+  Still to finish R3 fully: the responder side (retinue accepting an inbound link
+  and proving it), keepalive/teardown handling on receipt, and request/response.
+  Establishment and the data channel, the load-bearing unknowns, are done.
 - **R4 — resources.** The resource transfer mechanism over links (segmented
   large payloads, progress, cancellation).
   Done when: a multi-megabyte resource round-trips retinue ↔ oracle intact in
