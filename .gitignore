@@ -1,2 +1,6 @@
 /target
 Cargo.lock
+
+# The oracle's Python venv. Recreate with oracle/requirements.txt (pins rns==1.3.8);
+# see oracle/README.md. The fixtures it produces ARE committed, so tests need no Python.
+oracle/.venv/

@@ -1,0 +1,183 @@
+{
+  "constants": {
+    "Identity.KEYSIZE_bits": 512,
+    "Identity.RATCHETSIZE_bits": 256,
+    "Identity.TRUNCATED_HASHLENGTH_bits": 128,
+    "Identity.NAME_HASH_LENGTH_bits": 80,
+    "Identity.SIGLENGTH_bits": 512,
+    "Identity.TOKEN_OVERHEAD_bytes": 48,
+    "Identity.DERIVED_KEY_LENGTH_bytes": 64,
+    "Reticulum.MTU": 500,
+    "Reticulum.MDU": 464,
+    "Reticulum.HEADER_MINSIZE": 19,
+    "Reticulum.HEADER_MAXSIZE": 35,
+    "Reticulum.IFAC_MIN_SIZE": 1,
+    "Packet.ENCRYPTED_MDU": 383,
+    "Packet.PLAIN_MDU": 464,
+    "Link.ECPUBSIZE": 64,
+    "Link.KEYSIZE": 32,
+    "Link.MDU": 431,
+    "Link.LINK_MTU_SIZE": 3,
+    "Link.MODE_AES128_CBC": 0,
+    "Link.MODE_AES256_CBC": 1,
+    "Destination.RATCHET_COUNT": 512,
+    "Destination.RATCHET_INTERVAL": 1800
+  },
+  "identity_vector": {
+    "description": "Deterministic identity from a fixed 64-byte private key, and every value RNS derives from it. retinue must reproduce all of these exactly.",
+    "private_key_hex": "f0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6cf0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6c",
+    "private_key_layout": "x25519_secret(32) || ed25519_seed(32)",
+    "public_key_hex": "a8fd56cbca13577c24914cc4c13308b7d7f3e20bd39c55a4e636984655be343884f6da8c37b5f343568b185a20c63b5bf011a3d60ee805bb9e151371ea1d5555",
+    "public_key_layout": "x25519_public(32) || ed25519_verifying(32)",
+    "identity_hash_hex": "70de4e01d8064fae79daa0e198233f56",
+    "identity_hash_rule": "trunc16(sha256(public_key))",
+    "hkdf_salt_hex": "70de4e01d8064fae79daa0e198233f56",
+    "hkdf_salt_rule": "the identity hash",
+    "hkdf_info": null,
+    "destinations": {
+      "example_utilities.announcesample.fruits": {
+        "destination_hash_hex": "2419dca3c93718497b91990373df1503",
+        "beechat_crate_expected": "2419dca3c93718497b91990373df1503",
+        "beechat_matches": true
+      },
+      "retinue.test": {
+        "app_name": "retinue",
+        "aspects": [
+          "test"
+        ],
+        "name_hash_hex": "46d1eba5f26ba9153518",
+        "destination_hash_hex": "a8725a7e212dace39e9f99a8ac5da28c"
+      }
+    }
+  },
+  "fixtures": {
+    "announce_plain.bin": {
+      "description": "RNS 1.3.8 announce for retinue.test. ratchets=off, app_data=none. Full packet including the 19-byte header.",
+      "size": 167,
+      "ratchets": false,
+      "app_data_hex": null,
+      "payload_len": 148,
+      "context_flag": false,
+      "rns_self_validates": true,
+      "destination_hash_hex": "a8725a7e212dace39e9f99a8ac5da28c"
+    },
+    "announce_appdata.bin": {
+      "description": "RNS 1.3.8 announce for retinue.test. ratchets=off, app_data=yes. Full packet including the 19-byte header.",
+      "size": 185,
+      "ratchets": false,
+      "app_data_hex": "726574696e75652d72302d66697874757265",
+      "payload_len": 166,
+      "context_flag": false,
+      "rns_self_validates": true,
+      "destination_hash_hex": "a8725a7e212dace39e9f99a8ac5da28c"
+    },
+    "announce_ratchet.bin": {
+      "description": "RNS 1.3.8 announce for retinue.test. ratchets=on, app_data=none. Full packet including the 19-byte header.",
+      "size": 199,
+      "ratchets": true,
+      "app_data_hex": null,
+      "payload_len": 180,
+      "context_flag": true,
+      "rns_self_validates": true,
+      "destination_hash_hex": "a8725a7e212dace39e9f99a8ac5da28c"
+    },
+    "announce_ratchet_appdata.bin": {
+      "description": "RNS 1.3.8 announce for retinue.test. ratchets=on, app_data=yes. Full packet including the 19-byte header.",
+      "size": 217,
+      "ratchets": true,
+      "app_data_hex": "726574696e75652d72302d66697874757265",
+      "payload_len": 198,
+      "context_flag": true,
+      "rns_self_validates": true,
+      "destination_hash_hex": "a8725a7e212dace39e9f99a8ac5da28c"
+    },
+    "announce_invalid_pubkey.bin": {
+      "description": "announce_appdata.bin with byte 24 XOR 0xFF, corrupting the pubkey. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 24,
+      "corrupts": "pubkey",
+      "rns_rejects": true
+    },
+    "announce_invalid_namehash.bin": {
+      "description": "announce_appdata.bin with byte 85 XOR 0xFF, corrupting the namehash. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 85,
+      "corrupts": "namehash",
+      "rns_rejects": true
+    },
+    "announce_invalid_randhash.bin": {
+      "description": "announce_appdata.bin with byte 95 XOR 0xFF, corrupting the randhash. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 95,
+      "corrupts": "randhash",
+      "rns_rejects": true
+    },
+    "announce_invalid_signature.bin": {
+      "description": "announce_appdata.bin with byte 108 XOR 0xFF, corrupting the signature. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 108,
+      "corrupts": "signature",
+      "rns_rejects": true
+    },
+    "announce_invalid_appdata.bin": {
+      "description": "announce_appdata.bin with byte 182 XOR 0xFF, corrupting the appdata. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 182,
+      "corrupts": "appdata",
+      "rns_rejects": true
+    },
+    "announce_invalid_desthash.bin": {
+      "description": "announce_appdata.bin with byte 5 XOR 0xFF, corrupting the desthash. MUST fail validation.",
+      "size": 185,
+      "mutated_offset": 5,
+      "corrupts": "desthash",
+      "rns_rejects": true
+    },
+    "token_identity.bin": {
+      "description": "Identity.encrypt() output for a known plaintext under the fixed identity. Layout: ephemeral_x25519_pub(32) || IV(16) || AES-256-CBC/PKCS7 ciphertext || HMAC-SHA256(32). Non-deterministic (random ephemeral key and IV), so retinue cannot byte-match it. retinue must DECRYPT it: that is the real test.",
+      "size": 144,
+      "plaintext_hex": "726574696e756520746f6b656e20666978747572652c206c6f6e6720656e6f75676820746f207370616e2074776f2041455320626c6f636b73",
+      "rns_roundtrip_ok": true
+    }
+  },
+  "ratchet_diff": {
+    "payload_len_without": 148,
+    "payload_len_with": 180,
+    "delta_bytes": 32,
+    "ratchet_offset": [
+      84,
+      116
+    ],
+    "signature_offset_with_ratchet": [
+      116,
+      180
+    ],
+    "signature_offset_without_ratchet": [
+      84,
+      148
+    ],
+    "signalled_by": "bit 5 of header byte 0 (Context Flag)",
+    "header_byte0_without": 1,
+    "header_byte0_with": 33
+  },
+  "announce_layout": {
+    "wire_payload": "x25519_pub(32) || ed25519_pub(32) || name_hash(10) || rand_hash(10) || [ratchet(32) if context_flag] || signature(64) || app_data(*)",
+    "signed_message": "dest_hash(16) || x25519_pub(32) || ed25519_pub(32) || name_hash(10) || rand_hash(10) || [ratchet(32)] || app_data(*)",
+    "signed_message_note": "The signed message is the wire payload with the destination hash prepended and the signature spliced out. The destination hash is NOT in the payload: it comes from the packet header. Verified by independent Ed25519 verification against all four announce variants.",
+    "ratchet_id_rule": "trunc10(sha256(ratchet_public_key))"
+  },
+  "token": {
+    "layout": "ephemeral_x25519_pub(32) || IV(16) || AES-256-CBC/PKCS7 || HMAC-SHA256(32)",
+    "kdf": "HKDF-SHA256(ikm=x25519_shared, salt=identity_hash(16), info=empty, len=64)",
+    "key_split": "sign_key = derived[0:32] (HMAC-SHA256), enc_key = derived[32:64] (AES-256)",
+    "hmac_covers": "IV || ciphertext  (the ephemeral public key is NOT authenticated)",
+    "verified_by": "Independent decryption in scratch/crypto_probe.py using `cryptography` alone, trying all four (aes_size x split_order) combinations. Only AES-256 with sign-key-first both authenticates and decrypts."
+  },
+  "rns_version": "1.3.8",
+  "provenance": "Generated by oracle/capture.py against the RNS reference implementation, used strictly as a black box. RNS source was never read.",
+  "notes": [
+    "Beechat destination-hash vector MATCHES RNS 1.3.8.",
+    "A ratcheted announce is +32 bytes; the 32-byte ratchet public key is inserted between rand_hash and the signature (payload[84:116]), and its presence is signalled by bit 5 of header byte 0 (the Context Flag).",
+    "Beechat 0.1.0 models neither the context flag nor the ratchet, so it cannot parse or validate a ratcheted announce. Ratchets are off by default, which is the only reason a Beechat<->RNS pairing appears to work."
+  ]
+}
