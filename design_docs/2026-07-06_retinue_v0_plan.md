@@ -132,12 +132,18 @@ the Python dependency stays off the critical path.
   ratchet to encrypt to, and what a receiver retains (`RATCHET_COUNT = 512`,
   `RATCHET_INTERVAL = 1800`, `RATCHET_EXPIRY = 30 days`). Settle at R3, the same
   way: by capture.
-- **Link AES mode is negotiated, not fixed.** `Link.MODE_AES128_CBC = 0` and
-  `MODE_AES256_CBC = 1` exist, and `LINK_MTU_SIZE = 3`, so a link request or proof
-  likely carries three trailing bytes encoding mode and MTU. Beechat sends 64-byte
-  requests and accepts 96-or-99-byte proofs, which is consistent with an optional
-  3-byte trailer it does not understand. This is the top R3 unknown and a wrong
-  guess breaks every link. Capture a live handshake before writing link code.
+- **Link trailer and link id: ANSWERED 2026-07-13** by `oracle/capture_link.py`.
+  A link request is **67** bytes and a proof **99**: both carry a 3-byte trailer of
+  `mode(3 bits) | mtu(21 bits)`, big-endian. The initiator asks for AES-256 and MTU
+  8192; the responder answers AES-256 and MTU 500. The link id is
+  `trunc16(SHA256((flags & 0x0F) || destination || context || payload[..64]))`, with
+  `hops` excluded and the trailer deliberately outside the hash. Solved against two
+  captured (request, link id) pairs. Encoded in `src/link.rs` with both vectors as
+  tests. Caveat recorded there: both samples had `flags == 0x02`, so the `& 0x0F`
+  mask is taken on authority, not proven.
+- **Still open for R3:** the proof's internal field order (signature-then-key, or
+  key-then-signature), which needs the signed pre-image; and the ratchet selection
+  rules on links (`RATCHET_COUNT = 512`, `RATCHET_INTERVAL = 1800`, 30-day expiry).
 - Whether the link layer gets a reliability shim. RNS link data packets are
   unsequenced and best-effort (see "Lessons from the Beechat probe"). Over TCP
   that is invisible; over LoRa it is not. Decide at R3 whether `AsyncRead`/

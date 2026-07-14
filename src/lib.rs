@@ -32,6 +32,7 @@ pub mod destination;
 pub mod hash;
 pub mod identity;
 pub mod iface;
+pub mod link;
 pub mod packet;
 pub mod token;
 
@@ -60,6 +61,8 @@ pub enum Error {
     BadPadding,
     /// An announce decoder was handed a packet that is not an announce.
     NotAnAnnounce,
+    /// A link trailer named a cipher mode we do not know.
+    BadLinkMode,
 }
 
 impl core::fmt::Display for Error {
@@ -72,6 +75,7 @@ impl core::fmt::Display for Error {
             Self::BadMac => "token HMAC did not verify",
             Self::BadPadding => "malformed padding",
             Self::NotAnAnnounce => "packet is not an announce",
+            Self::BadLinkMode => "unknown link cipher mode",
         };
         f.write_str(s)
     }

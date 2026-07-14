@@ -83,6 +83,54 @@ it is now confirmed.
 `example_utilities.announcesample.fruits` hashes to `2419dca3c93718497b91990373df1503` —
 the same value the Beechat crate's own test prints. RNS, Beechat, and retinue now agree.
 
+**TCP framing is HDLC** (`oracle/capture_tcp.py`): flag `0x7E`, escape `0x7D`, escaped byte
+XORed with `0x20`, and **both** special bytes are escaped. The flag case appeared
+unprompted, because the fixture destination hash contains a literal `0x7E` and RNS stuffed
+it to `7d 5e`. The escape-byte case was pinned deliberately, by announcing `app_data` of
+`7e 7d 7e 7d 00 ff` and reading `7d5e 7d5d 7d5e 7d5d 00 ff` off the wire.
+
+### 0.1 Links (`oracle/capture_link.py`, 2026-07-13)
+
+Captured by provoking a handshake in both directions without implementing links: retinue
+announces so RNS links *to* it (showing the request), and retinue fires a raw link request
+*at* RNS so RNS proves back (showing the proof, addressed to the link id).
+
+**A link request is 67 bytes, not 64. A link proof is 99, not 96.** Both carry a 3-byte
+trailer after the key material:
+
+```text
+bits 23..21   AES mode  (0 = AES-128-CBC, 1 = AES-256-CBC)
+bits 20..0    MTU
+```
+
+Observed: the initiator sends `20 20 00` = mode 1 (AES-256), MTU 8192. The responder
+answers `20 01 f4` = mode 1, MTU **500**, which is exactly `Reticulum.MTU`. So this is an
+**MTU negotiation**, and the link cipher is AES-256 on both ends. Beechat sends a bare
+64-byte request and does not participate in any of it.
+
+**The link id** is a truncated hash over the request, and none of the obvious guesses is
+right:
+
+```text
+link_id = trunc16(SHA256( (flags & 0x0F) || destination(16) || context(1) || payload[..64] ))
+```
+
+`hops` is excluded, which is sensible since it mutates in transit. The payload is
+**truncated to the 64 bytes of keys**, so the negotiable trailer deliberately does not
+affect the id. Solved against two independently captured (request, link id) pairs; only
+this formula satisfies both, and the 67-byte pair is what proves the truncation.
+
+> **Honest caveat.** Both captured samples had `flags == 0x02`, where `& 0x0F` is a no-op.
+> The capture therefore does **not** prove the mask; it is taken on [M]'s and [B]'s
+> authority. It only becomes observable for a link request arriving over a transport hop
+> (header type 2, or propagation = transport). If a multi-hop link ever fails to establish,
+> look here first.
+
+Encoded in `src/link.rs`, with both captured vectors as regression tests. Section 4's
+questions **O-4b** and **O-4c** (the proof's field order and length) are partially answered:
+the length is 99, and the trailer is last. Whether the first 64 bytes are the signature or
+the 32-byte key comes first is still open, and needs the signed pre-image to settle.
+
 ---
 
 ---
