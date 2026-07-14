@@ -186,6 +186,23 @@ impl Packet {
         })
     }
 
+    /// The RNS packet hash: `trunc16(SHA256(masked_flags || destination || context ||
+    /// payload))`, where `masked_flags` is the low nibble of the flag byte (the high nibble
+    /// changes in transit). This is what RNS calls a packet's truncated hash, and it is the
+    /// `request_id` that ties a response to its request. Verified against RNS 1.3.8.
+    ///
+    /// Note the transport address of a header-type-2 packet is deliberately excluded, the
+    /// same way RNS excludes it, so the hash is stable across a transport hop.
+    pub fn hash(&self) -> AddressHash {
+        let flags = self.encode()[0] & 0x0F;
+        let mut buf = Vec::with_capacity(1 + ADDRESS_HASH_LEN + 1 + self.payload.len());
+        buf.push(flags);
+        buf.extend_from_slice(self.destination.as_slice());
+        buf.push(self.context);
+        buf.extend_from_slice(&self.payload);
+        AddressHash::of(&buf)
+    }
+
     /// Encode a packet for the wire.
     pub fn encode(&self) -> Vec<u8> {
         let mut flags = 0u8;
@@ -256,5 +273,20 @@ mod tests {
     #[test]
     fn truncated_input_is_an_error() {
         assert!(Packet::decode(&[0x01, 0x00]).is_err());
+    }
+
+    /// Known answer from `oracle/capture_reqresp_response.py`: this exact request packet
+    /// hashes to the request_id RNS's handler reported. Pins the packet-hash formula.
+    #[test]
+    fn packet_hash_matches_rns_request_id() {
+        let raw = hex::decode(
+            "0c00e83cb1d07bf63284ec96514304f2968809d0572c505e36c218000000000000\
+             0002d73c7bae548832cc812652952250be37815ddba83dc19dd524bd54d2582bf58\
+             96f91bd15bc04e6488955bef5ecdad979431ec22ba1316d1ba01a9ed425e666c4be\
+             c72382a3a3b44dc12821925b5ab4b1",
+        )
+        .unwrap();
+        let packet = Packet::decode(&raw).unwrap();
+        assert_eq!(packet.hash().to_string(), "9ab513b3bba3e87c5878bba6bf421119");
     }
 }

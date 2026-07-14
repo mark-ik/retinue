@@ -71,6 +71,12 @@ pub const CTX_KEEPALIVE: u8 = 0xfa;
 /// Packet context byte for a link close.
 pub const CTX_LINKCLOSE: u8 = 0xfc;
 
+/// Packet context byte for a request over a link.
+pub const CTX_REQUEST: u8 = 0x09;
+
+/// Packet context byte for a response over a link.
+pub const CTX_RESPONSE: u8 = 0x0a;
+
 /// Keepalive request/response sentinels, carried as the single plaintext byte of a
 /// keepalive packet.
 pub const KEEPALIVE_REQUEST: u8 = 0xff;
@@ -376,6 +382,10 @@ pub enum Inbound {
     KeepAliveResponse,
     /// The peer tore the link down.
     Close,
+    /// A request, already decrypted. The payload is RNS's msgpack-packed request.
+    Request(Vec<u8>),
+    /// A response, already decrypted. The payload is RNS's msgpack-packed response.
+    Response(Vec<u8>),
     /// Addressed to this link but not a shape we recognise.
     Unknown,
 }
@@ -433,6 +443,14 @@ impl Link {
                 Err(_) => Inbound::Unknown,
             },
             CTX_LRRTT => Inbound::Rtt,
+            CTX_REQUEST => match self.decrypt(packet) {
+                Ok(data) => Inbound::Request(data),
+                Err(_) => Inbound::Unknown,
+            },
+            CTX_RESPONSE => match self.decrypt(packet) {
+                Ok(data) => Inbound::Response(data),
+                Err(_) => Inbound::Unknown,
+            },
             CTX_KEEPALIVE => match packet.payload.first().copied() {
                 Some(KEEPALIVE_REQUEST) => Inbound::KeepAliveRequest,
                 Some(KEEPALIVE_RESPONSE) => Inbound::KeepAliveResponse,
@@ -451,6 +469,19 @@ impl Link {
         plain.push(0xca);
         plain.extend_from_slice(&rtt_seconds.to_be_bytes());
         link_packet(CTX_LRRTT, self.id, self.keys.encrypt(&plain, iv))
+    }
+
+    /// Encrypt an already-packed request into a link request packet (context `0x09`).
+    ///
+    /// The `packed` bytes are RNS's msgpack request structure; retinue does not impose one,
+    /// so a caller can carry whatever the peer expects. See [`crate::request`].
+    pub fn request_packet(&self, packed: &[u8], iv: &[u8; IV_LEN]) -> Packet {
+        link_packet(CTX_REQUEST, self.id, self.keys.encrypt(packed, iv))
+    }
+
+    /// Encrypt an already-packed response into a link response packet (context `0x0a`).
+    pub fn response_packet(&self, packed: &[u8], iv: &[u8; IV_LEN]) -> Packet {
+        link_packet(CTX_RESPONSE, self.id, self.keys.encrypt(packed, iv))
     }
 
     /// A keepalive. The peer answers a [`KEEPALIVE_REQUEST`] with a [`KEEPALIVE_RESPONSE`].

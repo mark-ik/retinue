@@ -108,9 +108,24 @@ mapping, bilateral streams).
   bytes both ways, a keepalive round-trips, and retinue recognises the teardown.
 
   R3 is functionally complete for a link peer: both roles, encrypted channel both
-  ways, keepalive, teardown. The one listed item deferred is RNS-style
-  request/response (contexts `0x09`/`0x0a`), a thin protocol over links that sits
-  closer to the application than the wire; it carries no unknown wire facts.
+  ways, keepalive, teardown.
+
+  **Request/response DONE 2026-07-13.** Captured, then implemented in `src/request.rs`.
+  RNS layers a thin request/response protocol on the link data channel:
+  - request  = msgpack `[time_f64, path_hash(16), data]`, context `0x09`;
+  - response = msgpack `[request_id(16), data]`, context `0x0a`;
+  - `path_hash = trunc16(SHA256(path))`, and `request_id` is the request packet's
+    hash: `trunc16(SHA256(masked_flags || dest || context || ciphertext))`, RNS's
+    generic packet hash, now on `Packet::hash`.
+
+  retinue treats request and response data as opaque bytes (RNS can carry any msgpack
+  value; a consumer layers its own structure), which keeps retinue a transport. The
+  gate passes both ways (`oracle/interop_reqresp.py`): retinue requests `/echo` from
+  RNS and matches the response by id, and RNS requests `/svc` from retinue and gets
+  retinue's answer. A minimal purpose-built msgpack codec handles exactly these two
+  shapes; no msgpack dependency was added.
+
+  **R3 is now complete.**
 - **R4 — resources.** The resource transfer mechanism over links (segmented
   large payloads, progress, cancellation).
   Done when: a multi-megabyte resource round-trips retinue ↔ oracle intact in

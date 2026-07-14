@@ -104,7 +104,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Inbound::Rtt) => println!("RECV_RTT"),
                 Some(Inbound::Close) => { println!("RECV_CLOSE"); break; }
                 Some(Inbound::KeepAliveResponse) => println!("RECV_KEEPALIVE_RESPONSE"),
-                Some(Inbound::Unknown) | None => {}
+                Some(Inbound::Request(_) | Inbound::Response(_) | Inbound::Unknown) | None => {}
             },
             None => {}
         }

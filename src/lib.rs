@@ -34,6 +34,7 @@ pub mod identity;
 pub mod iface;
 pub mod link;
 pub mod packet;
+pub mod request;
 pub mod token;
 
 pub use announce::Announce;
@@ -69,6 +70,8 @@ pub enum Error {
     NotALinkRequest,
     /// A proof was addressed to a different link than the one it is being matched against.
     LinkMismatch,
+    /// A request or response could not be parsed from its msgpack.
+    BadRequest,
 }
 
 impl core::fmt::Display for Error {
@@ -85,6 +88,7 @@ impl core::fmt::Display for Error {
             Self::NotAProof => "packet is not a proof",
             Self::NotALinkRequest => "packet is not a link request",
             Self::LinkMismatch => "proof is for a different link",
+            Self::BadRequest => "malformed request or response",
         };
         f.write_str(s)
     }
