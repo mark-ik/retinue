@@ -145,10 +145,19 @@ mapping, bilateral streams).
   shapes; no msgpack dependency was added.
 
   **R3 is now complete.**
-- **R4 — resources.** The resource transfer mechanism over links (segmented
-  large payloads, progress, cancellation).
-  Done when: a multi-megabyte resource round-trips retinue ↔ oracle intact in
-  both directions.
+- **R4 — resources. PROTOCOL REVERSED 2026-07-13; implementation pending.** The
+  resource transfer mechanism over links. Captured a real RNS 4 KB resource send
+  and reversed the advertisement fully (see the wire reference, section 0.2): a
+  msgpack map with transfer/data sizes, part count, resource/original hashes, a
+  per-part hashmap, and flags. The flow is a windowed exchange, advertisement →
+  request → parts → proof, with bz2 compression (`t < d` in the capture) and
+  hashmap updates for large resources.
+
+  Not yet implemented, and deliberately sequenced after R5: it is the largest phase
+  (a stateful windowed protocol plus compression), and it is not on R5's path, since
+  mere uses bilateral link streams rather than resources. Done-condition unchanged: a
+  multi-megabyte resource round-trips retinue ↔ oracle intact both ways. Tooling in
+  place: `oracle/capture_resource.py`, `examples/resource_probe.rs`.
 - **R5 — Mere adoption.** Implement Mere's `Transport` trait on retinue;
   replace the Beechat pin behind the existing feature gate; carry over the
   probe's tests (deterministic seed → destination, announce-bound `PeerID`,

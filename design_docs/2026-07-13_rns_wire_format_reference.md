@@ -131,6 +131,44 @@ questions **O-4b** and **O-4c** (the proof's field order and length) are partial
 the length is 99, and the trailer is last. Whether the first 64 bytes are the signature or
 the 32-byte key comes first is still open, and needs the signed pre-image to settle.
 
+### 0.2 Resources (`oracle/capture_resource.py`, 2026-07-13) — protocol reversed, not yet implemented
+
+A resource is RNS's segmented transfer of a payload too large for one packet, over a link.
+Captured by having RNS send retinue a 4 KB resource; retinue dumped every decrypted link
+packet. The flow, by link context byte:
+
+```text
+0x02 RESOURCE_ADV   advertisement (msgpack map; retransmitted until the receiver responds)
+0x03 RESOURCE_REQ   receiver requests parts it still needs
+0x01 RESOURCE       a part (segment) of the payload
+0x04 RESOURCE_HMU   hashmap update, for resources with more parts than one advert carries
+0x05 RESOURCE_PRF   receiver's proof of receipt
+0x06 RESOURCE_ICL   sender cancels (seen when retinue never responded: status FAILED)
+0x07 RESOURCE_RCL   receiver cancels
+```
+
+The **advertisement** is a msgpack map (decoded from a real capture):
+
+| key | meaning | example |
+| --- | --- | --- |
+| `t` | transfer size, after compression | 720 |
+| `d` | uncompressed data size | 4096 |
+| `n` | number of parts | 2 |
+| `h` | resource hash (32) | `11b44f89...b60e` |
+| `o` | original (uncompressed) hash (32) | `11b44f89...b60e` |
+| `r` | random hash (4) | `fddb2d74` |
+| `f` | flags | 3 |
+| `m` | hashmap: 4 bytes per part | `202ecd18fe3e1fcb` (2 parts) |
+| `i`, `l`, `q` | opaque (interleave / segment / request), not yet named | 1, 1, nil |
+
+`t = 720 < d = 4096` means RNS **bz2-compressed** the payload before segmenting, then split
+it into `n` parts each keyed by a 4-byte map hash. The receiver must request parts, collect
+them, decompress, verify against `o`, and prove.
+
+This is a windowed, stateful protocol with compression, and it is **not yet implemented**. It
+is also not on the path to R5 (mere uses bilateral link streams, not resources). Tooling:
+`oracle/capture_resource.py` and `examples/resource_probe.rs` reproduce the capture.
+
 ---
 
 ---
