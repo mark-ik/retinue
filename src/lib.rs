@@ -27,6 +27,7 @@
 //! emitted are checked in as fixtures under `tests/fixtures/`. See
 //! `design_docs/2026-07-13_rns_wire_format_reference.md`.
 
+pub mod address_book;
 pub mod announce;
 pub mod destination;
 pub mod hash;
@@ -34,9 +35,11 @@ pub mod identity;
 pub mod iface;
 pub mod link;
 pub mod packet;
+pub mod path;
 pub mod request;
 pub mod token;
 
+pub use address_book::{AddressBook, Peer};
 pub use announce::Announce;
 pub use destination::DestinationName;
 pub use hash::{AddressHash, NameHash};

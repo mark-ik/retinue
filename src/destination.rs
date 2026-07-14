@@ -79,6 +79,15 @@ pub fn destination_hash(name_hash: NameHash, identity_hash: AddressHash) -> Addr
     AddressHash::of(&buf)
 }
 
+impl DestinationName {
+    /// The hash of a *plain* destination: one with no identity, like the well-known
+    /// `rnstransport.path.request`. It is `trunc16(SHA256(name_hash))`, the identity-bearing
+    /// form with an empty identity. Verified against RNS 1.3.8.
+    pub fn plain_hash(&self) -> AddressHash {
+        AddressHash::of(self.name_hash.as_slice())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

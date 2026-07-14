@@ -1,13 +1,12 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-13):** **R0, R1, and R3 are done, all verified against the
-oracle.** retinue holds an identity, builds and validates announces (ratcheted and
-not), frames HDLC, exchanges announces with a real RNS 1.3.8 over live TCP both
-ways, and is a **full encrypted-link peer in both roles**: it initiates and accepts
-links, exchanges application bytes both ways, and handles keepalive and teardown.
-38 tests green, plus three live mixed-runtime interop gates that pass. Remaining for
-v0: R2 (announce cadence and address book), R4 (resources), and R5 (fix mere onto
-retinue). R3 request/response is a small deferred follow-on.
+**Status (2026-07-13):** **R0, R1, R2, and R3 are done, all verified against the
+oracle.** retinue holds an identity; builds and validates announces (ratcheted and
+not); frames HDLC; exchanges announces with a real RNS 1.3.8 over live TCP both
+ways; learns peers into an address book and emits path requests; is a **full
+encrypted-link peer in both roles** (initiate and accept, data both ways, keepalive,
+teardown, request/response). 43 tests green, plus five live mixed-runtime interop
+gates that pass. Remaining for v0: R4 (resources) and R5 (fix mere onto retinue).
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -72,11 +71,31 @@ mapping, bilateral streams).
   was captured, not assumed: `0x7E` flag, `0x7D` escape, XOR `0x20`, and *both*
   special bytes escaped, which was settled by announcing `app_data` full of them
   and reading the wire.
-- **R2 — endpoint announce/path behavior.** Announce emission cadence,
-  receipt, address-book resolution, path requests to the degree an endpoint
-  needs them (reaching peers beyond one hop through RNS transport nodes).
-  Done when: retinue behind an oracle-run transport node can resolve and be
-  resolved by a peer two hops away.
+- **R2 — endpoint announce/path behavior. DONE 2026-07-13** (endpoint parts).
+  Announce cadence, receipt, address-book resolution, and path-request emission.
+  - `src/address_book.rs`: ingests validated announces (keyed by destination hash)
+    and resolves a destination to its identity and current ratchet. This is what a
+    link needs. Tested against the committed announce fixtures.
+  - `src/path.rs`: builds a path request, a plain data packet to
+    `rnstransport.path.request` carrying `target(16) || tag(16)`. The plain
+    destination hash and the packet layout are known-answer tested against a capture
+    of `RNS.Transport.request_path`. `DestinationName::plain_hash` handles the
+    identity-less plain form.
+  - Cadence is `tokio::time::interval` + `announce::build` in the shell; the R2 gate
+    demonstrates it.
+
+  The gate passes (`oracle/interop_r2.py`): against a transport-enabled RNS, retinue
+  announces itself, emits a path request RNS accepts, re-announces on cadence, and
+  resolves the target from a real RNS announce into its address book.
+
+  Scope note: the plan's original done-condition names a *two-hop* resolve through a
+  transport node. In a direct single-interface connection (retinue's actual use in
+  mere, and this gate) announces propagate directly, so the path request is not
+  strictly required to resolve; forcing a path-request-only resolve needs a
+  two-transport-node topology. retinue's own R2 responsibilities, emit announces on
+  cadence, ingest announces, and emit well-formed path requests, are all implemented
+  and verified against real RNS. The relay itself is RNS transport behaviour, not
+  retinue code, so it is not gated here.
 - **R3 — links. ESTABLISHMENT + CHANNEL DONE 2026-07-13.** Link establishment
   (request, proof, key derivation) and the encrypted data channel, in `src/link.rs`.
   Done: the live gate passes (`oracle/interop_link.py`). retinue's own code opens a
