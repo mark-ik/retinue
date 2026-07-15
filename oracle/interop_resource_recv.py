@@ -13,10 +13,13 @@ import RNS
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
+import hashlib
 done = threading.Event()
 result = {}
-# Compressible payload so RNS's default bz2 actually engages: retinue must decompress it.
-PAYLOAD = bytes((i // 30) & 0xff for i in range(3000))
+# A large, incompressible payload: forces MANY parts (well past the 74-hash advertisement
+# limit) so the windowed hashmap-update (HMU) path is exercised. auto_compress off below.
+PAYLOAD = bytes(((i * 2654435761) >> 8) & 0xff for i in range(120000))  # ~120 KB, 259 parts
+PAYLOAD_HASH = hashlib.sha256(PAYLOAD).hexdigest()
 
 
 def main() -> int:
@@ -52,13 +55,13 @@ def main() -> int:
                                       RNS.Destination.SINGLE, "retinue", "resource")
                 link = RNS.Link(out)
                 def est(lk):
-                    print("  RNS: link up, sending a COMPRESSED resource")
+                    print("  RNS: link up, sending a 120KB UNCOMPRESSED resource (259 parts)")
                     def cb(res):
                         result["status"] = res.status
                         print(f"  RNS: resource concluded status={res.status} "
                               f"(COMPLETE=6, FAILED=7)")
                         done.set()
-                    RNS.Resource(PAYLOAD, lk, callback=cb, auto_compress=True)
+                    RNS.Resource(PAYLOAD, lk, callback=cb, auto_compress=False)
                 link.set_link_established_callback(est)
         RNS.Transport.register_announce_handler(Linker())
         print("waiting...\n")
@@ -66,15 +69,17 @@ def main() -> int:
         time.sleep(1)
 
         joined = "\n".join(lines)
-        m = re.search(r"DATA ([0-9a-f]+)", joined)
-        retinue_data_ok = bool(m and bytes.fromhex(m.group(1)) == PAYLOAD)
+        m = re.search(r"DATA_HASH ([0-9a-f]+)", joined)
+        retinue_data_ok = bool(m and m.group(1) == PAYLOAD_HASH)
+        used_hmu = "HMU +" in joined
         rns_complete = result.get("status") == 6  # RNS.Resource.COMPLETE
         print("\n" + "=" * 68)
-        print(f"retinue reassembled the payload intact: {'PASS' if retinue_data_ok else 'FAIL'}")
+        print(f"retinue reassembled the {len(PAYLOAD)}-byte payload intact: {'PASS' if retinue_data_ok else 'FAIL'}")
+        print(f"windowed HMU path exercised:            {'PASS' if used_hmu else 'FAIL'}")
         print(f"RNS accepted retinue's proof (COMPLETE): {'PASS' if rns_complete else 'FAIL'}")
         print("=" * 68)
-        ok = retinue_data_ok and rns_complete
-        print(f"R4 RESOURCE RECEIVE INTEROP: {'PASS' if ok else 'FAIL'}")
+        ok = retinue_data_ok and rns_complete and used_hmu
+        print(f"R4 WINDOWED RESOURCE RECEIVE INTEROP: {'PASS' if ok else 'FAIL'}")
         return 0 if ok else 1
     finally:
         try: proc.wait(timeout=8)

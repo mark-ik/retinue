@@ -1,10 +1,11 @@
-//! retinue receives a resource from RNS: parse the advertisement, request the parts, collect
-//! them, reassemble + decrypt + verify, and send the proof. RNS then concludes COMPLETE.
-//!
-//! Handles single-segment uncompressed resources (the gate sends `auto_compress=False`).
-//! Driven by `oracle/interop_resource_recv.py`.
+//! retinue receives a resource from RNS: parse the advertisement, request parts in a window,
+//! solicit more hashmap via HMU when the advertised hashes run out, then reassemble, decrypt,
+//! decompress, verify, and send the proof. RNS then concludes COMPLETE. Handles single-segment
+//! resources of any size. Driven by `oracle/interop_resource_recv.py`.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 
 use retinue::announce::{self, RAND_HASH_LEN};
 use retinue::destination::DestinationName;
@@ -23,14 +24,36 @@ fn rh() -> [u8; RAND_HASH_LEN] {
     o.copy_from_slice(&n[..RAND_HASH_LEN]);
     o
 }
-fn iv(n: u8) -> [u8; 16] {
+static IVC: AtomicU32 = AtomicU32::new(0);
+/// A fresh IV per call: time bytes plus a monotonic counter, unique within a run.
+fn iv() -> [u8; 16] {
     let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let c = IVC.fetch_add(1, Ordering::Relaxed);
     let mut v = [0u8; 16];
     v[..8].copy_from_slice(&t[..8]);
-    v[15] = n;
+    v[8..12].copy_from_slice(&c.to_le_bytes());
     v
 }
 async fn send(i: &mut TcpInterface, p: &Packet) { i.send(p).await.expect("send"); }
+
+/// Assemble, decrypt, decompress, verify, and prove a completed resource.
+async fn finish(iface: &mut TcpInterface, l: &Link, inc: &Incoming) -> Result<(), Box<dyn std::error::Error>> {
+    let token = inc.assemble_token()?;
+    let decrypted = l.open(&token)?;
+    match inc.recover(&decrypted) {
+        Ok(data) => {
+            println!("ASSEMBLED token={} data={} compressed={}", token.len(), data.len(), inc.is_compressed());
+            let proof = inc.proof(&data);
+            send(iface, &l.resource_proof_packet(&inc.resource_hash(), &proof)).await;
+            println!("SENT_PROOF {}", hex::encode(proof));
+            // Report the payload hash so the driver can check integrity without the full dump.
+            println!("DATA_HASH {}", hex::encode(retinue::hash::full_hash(&data)));
+            println!("DATA_LEN {}", data.len());
+        }
+        Err(e) => println!("RECOVER_FAILED {e}"),
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -75,36 +98,45 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Some(l) if packet.destination == l.id() => {
                 match packet.context {
-                    // Advertisement: parse, request all parts.
+                    // Advertisement: parse, request the parts it names.
                     0x02 => {
                         let plain = l.decrypt(&packet)?;
                         let adv = Advertisement::parse(&plain)?;
-                        println!("ADV t={} d={} n={} compressed={}",
-                            adv.transfer_size, adv.data_size, adv.parts,
+                        println!("ADV t={} d={} n={} hashmap={} compressed={}",
+                            adv.transfer_size, adv.data_size, adv.parts, adv.hashmap_parts(),
                             adv.flags & 0x02 != 0);
                         let inc = Incoming::new(&adv)?;
-                        send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ, &inc.request_payload(), &iv(1))).await;
-                        println!("REQUESTED {} parts", adv.parts);
+                        send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ,
+                            &inc.request(&inc.missing_known()), &iv())).await;
+                        println!("REQUESTED {} known parts (of {})", inc.missing_known().len(), inc.total_parts());
                         incoming = Some(inc);
                     }
-                    // Part: raw token slice.
+                    // Part: a raw token slice.
                     0x01 => {
                         if let Some(inc) = incoming.as_mut() {
                             inc.accept_part(&packet.payload);
                             if inc.is_complete() {
-                                let token = inc.assemble_token()?;
-                                let decrypted = l.open(&token)?;
-                                // recover: decompress if flagged, strip prefix, verify.
-                                match inc.recover(&decrypted) {
-                                    Ok(data) => {
-                                        println!("ASSEMBLED token={} data={} compressed={}",
-                                            token.len(), data.len(), inc.is_compressed());
-                                        let proof = inc.proof(&data);
-                                        send(&mut iface, &l.resource_proof_packet(&inc.resource_hash(), &proof)).await;
-                                        println!("SENT_PROOF {}", hex::encode(proof));
-                                        println!("DATA {}", hex::encode(&data));
-                                    }
-                                    Err(e) => println!("RECOVER_FAILED {e}"),
+                                finish(&mut iface, l, inc).await?;
+                                break;
+                            } else if inc.needs_hmu() {
+                                // Advertised hashes exhausted; solicit the rest of the hashmap.
+                                send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ,
+                                    &inc.solicit_hmu(), &iv())).await;
+                                println!("SOLICIT_HMU (have {} of {})", inc.order_len(), inc.total_parts());
+                            }
+                        }
+                    }
+                    // Hashmap update: more part hashes; request them.
+                    0x04 => {
+                        if let Some(inc) = incoming.as_mut() {
+                            let plain = l.decrypt(&packet)?;
+                            if let Ok(hmu) = retinue::resource::parse_hmu(&plain) {
+                                let added = inc.ingest_hmu(&hmu);
+                                println!("HMU +{added} hashes ({} of {})", inc.order_len(), inc.total_parts());
+                                let want = inc.missing_known();
+                                if !want.is_empty() {
+                                    send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ,
+                                        &inc.request(&want), &iv())).await;
                                 }
                             }
                         }

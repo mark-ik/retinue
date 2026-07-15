@@ -290,75 +290,253 @@ impl Advertisement {
     }
 }
 
-/// Receiver state for one incoming resource.
+/// Bytes of hashmap an advertisement carries at most. `RNS.ResourceAdvertisement`'s
+/// `HASHMAP_MAX_LEN` is 74 part-hashes; the rest stream via [`Hmu`].
+pub const HASHMAP_MAX_PARTS: usize = 74;
+
+/// A parsed part request (context `RESOURCE_REQ`).
 ///
-/// Drives a single-segment transfer: parse the advertisement, request the parts it names,
-/// collect them by map hash, then reassemble, decrypt, verify, and prove. Multi-segment
-/// resources (whose hashmap arrives incrementally via `RESOURCE_HMU`) are not handled yet;
-/// [`Incoming::new`] returns [`Error::BadRequest`] for an advertisement whose part count
-/// exceeds the hashmap it carries.
+/// Normal: `0x00 || resource_hash(32) || wanted(4*N)`. Exhausted (soliciting more hashmap):
+/// `0xff || last_map_hash(4) || resource_hash(32) || wanted(4*N)`. The leading map hash on the
+/// exhausted form tells the sender where the [`Hmu`] resumes. Verified against RNS 1.3.8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// The receiver's hashmap is exhausted and it wants more via an [`Hmu`].
+    pub exhausted: bool,
+    /// On an exhausted request, the last map hash the receiver already holds.
+    pub last_map_hash: Option<[u8; MAPHASH_LEN]>,
+    pub resource_hash: [u8; 32],
+    /// The map hashes of the parts being requested (may be empty on a pure HMU solicit).
+    pub wanted: Vec<[u8; MAPHASH_LEN]>,
+}
+
+/// Build a normal part request: `0x00 || resource_hash || wanted*`.
+pub fn build_request(resource_hash: &[u8; 32], wanted: &[[u8; MAPHASH_LEN]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 32 + wanted.len() * MAPHASH_LEN);
+    out.push(0x00);
+    out.extend_from_slice(resource_hash);
+    for w in wanted {
+        out.extend_from_slice(w);
+    }
+    out
+}
+
+/// Build an exhausted request soliciting more hashmap:
+/// `0xff || last_map_hash || resource_hash || wanted*`.
+pub fn build_exhausted_request(
+    last_map_hash: &[u8; MAPHASH_LEN],
+    resource_hash: &[u8; 32],
+    wanted: &[[u8; MAPHASH_LEN]],
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + MAPHASH_LEN + 32 + wanted.len() * MAPHASH_LEN);
+    out.push(0xff);
+    out.extend_from_slice(last_map_hash);
+    out.extend_from_slice(resource_hash);
+    for w in wanted {
+        out.extend_from_slice(w);
+    }
+    out
+}
+
+/// Parse a part request. The sender uses this to learn which parts to send and whether to
+/// emit an [`Hmu`].
+pub fn parse_request(payload: &[u8]) -> Result<Request> {
+    let flag = *payload.first().ok_or(Error::BadRequest)?;
+    let exhausted = flag == 0xff;
+    let mut off = 1;
+    let last_map_hash = if exhausted {
+        let m: [u8; MAPHASH_LEN] = payload
+            .get(off..off + MAPHASH_LEN)
+            .ok_or(Error::BadRequest)?
+            .try_into()
+            .expect("checked");
+        off += MAPHASH_LEN;
+        Some(m)
+    } else {
+        None
+    };
+    let resource_hash: [u8; 32] = payload
+        .get(off..off + 32)
+        .ok_or(Error::BadRequest)?
+        .try_into()
+        .expect("checked");
+    off += 32;
+    let wanted = payload[off..]
+        .chunks_exact(MAPHASH_LEN)
+        .map(|c| c.try_into().expect("exact"))
+        .collect();
+    Ok(Request {
+        exhausted,
+        last_map_hash,
+        resource_hash,
+        wanted,
+    })
+}
+
+/// A parsed hashmap update (context `RESOURCE_HMU`): the next batch of part map hashes.
+///
+/// `resource_hash(32) || msgpack([segment, hashmap_bin(4*M)])`. Verified against RNS 1.3.8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hmu {
+    pub resource_hash: [u8; 32],
+    pub segment: i64,
+    pub hashes: Vec<[u8; MAPHASH_LEN]>,
+}
+
+/// Build an HMU payload.
+pub fn build_hmu(resource_hash: &[u8; 32], segment: i64, hashes: &[[u8; MAPHASH_LEN]]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(32 + 4 + hashes.len() * MAPHASH_LEN);
+    out.extend_from_slice(resource_hash);
+    out.push(0x92); // fixarray, 2
+    // segment as a msgpack int (positive fixint covers the small counters RNS uses).
+    if (0..0x80).contains(&segment) {
+        out.push(segment as u8);
+    } else {
+        out.push(0xd3);
+        out.extend_from_slice(&segment.to_be_bytes());
+    }
+    let bin: Vec<u8> = hashes.iter().flat_map(|h| h.iter().copied()).collect();
+    // bin8/bin16 for the hashmap bytes.
+    if bin.len() <= u8::MAX as usize {
+        out.push(0xc4);
+        out.push(bin.len() as u8);
+    } else {
+        out.push(0xc5);
+        out.extend_from_slice(&(bin.len() as u16).to_be_bytes());
+    }
+    out.extend_from_slice(&bin);
+    out
+}
+
+/// Parse an HMU payload.
+pub fn parse_hmu(payload: &[u8]) -> Result<Hmu> {
+    let resource_hash: [u8; 32] = payload.get(..32).ok_or(Error::BadRequest)?.try_into().expect("32");
+    let mut r = MapReader::new(&payload[32..]);
+    if r.byte()? != 0x92 {
+        return Err(Error::BadRequest);
+    }
+    let segment = r.int()?;
+    let bin = r.bin()?;
+    if bin.len() % MAPHASH_LEN != 0 {
+        return Err(Error::BadRequest);
+    }
+    let hashes = bin
+        .chunks_exact(MAPHASH_LEN)
+        .map(|c| c.try_into().expect("exact"))
+        .collect();
+    Ok(Hmu {
+        resource_hash,
+        segment,
+        hashes,
+    })
+}
+
+/// Receiver state for one incoming resource segment.
+///
+/// Drives the windowed transfer: parse the advertisement's first hashmap, request parts,
+/// collect them by map hash, solicit more hashmap via [`Hmu`] when the advertised hashes run
+/// out, and finally reassemble, decrypt, decompress, verify, and prove. One `Incoming`
+/// handles one segment (a resource up to ~1 MB is a single segment).
 pub struct Incoming {
     hash: [u8; 32],
     random_hash: Vec<u8>,
     compressed: bool,
-    /// Map hashes in transfer order, as named by the advertisement hashmap.
+    total_parts: usize,
+    /// Map hashes in transfer order. Starts with the advertisement's hashmap and grows as
+    /// each [`Hmu`] arrives.
     order: Vec<[u8; MAPHASH_LEN]>,
     /// Collected parts, keyed by map hash.
     parts: std::collections::HashMap<[u8; MAPHASH_LEN], Vec<u8>>,
 }
 
 impl Incoming {
-    /// Begin receiving from an advertisement.
+    /// Begin receiving from an advertisement. Accepts a partial hashmap (a large resource
+    /// whose hashmap streams via [`Hmu`]); the missing hashes arrive later.
     pub fn new(adv: &Advertisement) -> Result<Self> {
         if adv.resource_hash.len() != 32 {
-            return Err(Error::BadRequest);
-        }
-        if adv.hashmap_parts() != adv.parts as usize {
-            // The full hashmap is not in this advertisement (a multi-segment resource).
             return Err(Error::BadRequest);
         }
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&adv.resource_hash);
         let order = adv
             .hashmap
-            .chunks(MAPHASH_LEN)
-            .map(|c| {
-                let mut m = [0u8; MAPHASH_LEN];
-                m.copy_from_slice(c);
-                m
-            })
+            .chunks_exact(MAPHASH_LEN)
+            .map(|c| c.try_into().expect("exact"))
             .collect();
         Ok(Self {
             hash,
             random_hash: adv.random_hash.clone(),
             compressed: adv.flags & FLAG_COMPRESSED != 0,
+            total_parts: adv.parts as usize,
             order,
             parts: std::collections::HashMap::new(),
         })
     }
 
-    /// Whether the advertisement said the payload is bz2-compressed. A caller must be able
-    /// to decompress if this is true; retinue leaves that to the consumer.
+    /// Whether the advertisement said the payload is bz2-compressed.
     pub fn is_compressed(&self) -> bool {
         self.compressed
     }
 
-    /// The request payload naming every part not yet held:
-    /// `flag(0x00) || resource_hash(32) || map_hash(4)*`.
-    pub fn request_payload(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + 32 + self.order.len() * MAPHASH_LEN);
-        out.push(0x00); // hashmap not exhausted
-        out.extend_from_slice(&self.hash);
-        for m in &self.order {
-            if !self.parts.contains_key(m) {
-                out.extend_from_slice(m);
-            }
-        }
-        out
+    /// Total parts in this segment.
+    pub fn total_parts(&self) -> usize {
+        self.total_parts
     }
 
-    /// Take a received part (a raw token slice). Matched to the transfer by its map hash;
-    /// a part whose map hash is not in the advertisement is ignored.
+    /// How many part hashes are known so far (advertisement + ingested HMUs).
+    pub fn order_len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Known map hashes not yet collected. These are what to ask for next.
+    pub fn missing_known(&self) -> Vec<[u8; MAPHASH_LEN]> {
+        self.order
+            .iter()
+            .filter(|m| !self.parts.contains_key(*m))
+            .copied()
+            .collect()
+    }
+
+    /// Whether every known map hash has been collected (but more may remain via HMU).
+    pub fn all_known_collected(&self) -> bool {
+        self.order.iter().all(|m| self.parts.contains_key(m))
+    }
+
+    /// Whether the full hashmap is known (all part hashes, via advertisement + HMUs).
+    pub fn have_all_hashes(&self) -> bool {
+        self.order.len() >= self.total_parts
+    }
+
+    /// Whether more hashmap is needed: known hashes exhausted, parts remain.
+    pub fn needs_hmu(&self) -> bool {
+        self.all_known_collected() && !self.have_all_hashes()
+    }
+
+    /// A normal request for the given map hashes.
+    pub fn request(&self, wanted: &[[u8; MAPHASH_LEN]]) -> Vec<u8> {
+        build_request(&self.hash, wanted)
+    }
+
+    /// An exhausted request soliciting more hashmap, referencing the last known map hash.
+    pub fn solicit_hmu(&self) -> Vec<u8> {
+        let last = self.order.last().copied().unwrap_or([0u8; MAPHASH_LEN]);
+        build_exhausted_request(&last, &self.hash, &[])
+    }
+
+    /// Ingest an HMU's hashes, appending any new ones in order. Returns how many were added.
+    pub fn ingest_hmu(&mut self, hmu: &Hmu) -> usize {
+        let mut added = 0;
+        for h in &hmu.hashes {
+            if !self.order.contains(h) {
+                self.order.push(*h);
+                added += 1;
+            }
+        }
+        added
+    }
+
+    /// Take a received part (a raw token slice). Matched by its map hash; a part whose map
+    /// hash is not (yet) known is ignored.
     pub fn accept_part(&mut self, part: &[u8]) -> bool {
         let m = map_hash(part, &self.random_hash);
         if self.order.contains(&m) {
@@ -369,22 +547,19 @@ impl Incoming {
         }
     }
 
-    /// Whether every advertised part has arrived.
+    /// Whether every part of the segment has arrived.
     pub fn is_complete(&self) -> bool {
-        self.order.iter().all(|m| self.parts.contains_key(m))
+        self.have_all_hashes() && self.all_known_collected()
     }
 
-    /// Reassemble the token in transfer order, decrypt it with the link, and return the
-    /// (still possibly compressed) payload. Verifies nothing on its own; call [`verify`].
-    ///
-    /// [`verify`]: Incoming::verify
+    /// Reassemble the token in transfer order. Verifies nothing; call [`recover`](Self::recover).
     pub fn assemble_token(&self) -> Result<Vec<u8>> {
         if !self.is_complete() {
             return Err(Error::Truncated);
         }
         let mut token = Vec::new();
         for m in &self.order {
-            token.extend_from_slice(self.parts.get(m).expect("complete"));
+            token.extend_from_slice(self.parts.get(m).ok_or(Error::Truncated)?);
         }
         Ok(token)
     }
@@ -432,6 +607,119 @@ impl Incoming {
     /// The resource hash from the advertisement.
     pub fn resource_hash(&self) -> [u8; 32] {
         self.hash
+    }
+}
+
+/// Sender state for one outgoing resource segment.
+///
+/// Splits a sealed token into parts, advertises the first [`HASHMAP_MAX_PARTS`] map hashes,
+/// serves part requests, and emits an [`Hmu`] when the receiver's hashmap runs out. Pair the
+/// advertisement and each served part / HMU with the link's framing in the shell.
+pub struct Outgoing {
+    hash: [u8; 32],
+    random_hash: [u8; RANDOM_HASH_LEN],
+    data_size: u64,
+    transfer_size: u64,
+    compressed: bool,
+    /// All part map hashes, in transfer order.
+    map_hashes: Vec<[u8; MAPHASH_LEN]>,
+    /// Parts (raw token slices) keyed by map hash.
+    by_hash: std::collections::HashMap<[u8; MAPHASH_LEN], Vec<u8>>,
+    expected_proof: [u8; 32],
+    hmu_segment: i64,
+}
+
+impl Outgoing {
+    /// Prepare to send `data`, already sealed into `token` (see [`content`] and the link's
+    /// `seal`). `compressed` records whether `token`'s plaintext was bz2-compressed.
+    pub fn new(data: &[u8], token: &[u8], random_hash: [u8; RANDOM_HASH_LEN], compressed: bool) -> Self {
+        let hash = resource_hash(data, &random_hash);
+        let (parts, _hashmap) = split_parts(token, &random_hash);
+        let mut map_hashes = Vec::with_capacity(parts.len());
+        let mut by_hash = std::collections::HashMap::new();
+        for p in parts {
+            let m = map_hash(&p, &random_hash);
+            map_hashes.push(m);
+            by_hash.insert(m, p);
+        }
+        Self {
+            hash,
+            random_hash,
+            data_size: data.len() as u64,
+            transfer_size: token.len() as u64,
+            compressed,
+            expected_proof: proof(data, &hash),
+            map_hashes,
+            by_hash,
+            hmu_segment: 1,
+        }
+    }
+
+    /// The advertisement, carrying the first [`HASHMAP_MAX_PARTS`] map hashes.
+    pub fn advertisement(&self) -> Advertisement {
+        let n = self.map_hashes.len().min(HASHMAP_MAX_PARTS);
+        let hashmap: Vec<u8> = self.map_hashes[..n]
+            .iter()
+            .flat_map(|h| h.iter().copied())
+            .collect();
+        let mut flags = FLAG_ENCRYPTED;
+        if self.compressed {
+            flags |= FLAG_COMPRESSED;
+        }
+        Advertisement {
+            transfer_size: self.transfer_size,
+            data_size: self.data_size,
+            parts: self.map_hashes.len() as u64,
+            resource_hash: self.hash.to_vec(),
+            original_hash: self.hash.to_vec(),
+            random_hash: self.random_hash.to_vec(),
+            flags,
+            hashmap,
+            i: 1,
+            l: 1,
+            q: None,
+        }
+    }
+
+    /// The parts to send in response to a request (those whose map hashes we hold).
+    pub fn serve(&self, request: &Request) -> Vec<Vec<u8>> {
+        request
+            .wanted
+            .iter()
+            .filter_map(|m| self.by_hash.get(m).cloned())
+            .collect()
+    }
+
+    /// Build the next hashmap update after `last_map_hash`: the batch of map hashes that
+    /// follow it in transfer order. Empty if `last_map_hash` is the final part.
+    pub fn hmu_after(&mut self, last_map_hash: &[u8; MAPHASH_LEN]) -> Vec<u8> {
+        let start = self
+            .map_hashes
+            .iter()
+            .position(|m| m == last_map_hash)
+            .map(|i| i + 1)
+            .unwrap_or(self.map_hashes.len());
+        // Send the rest of the hashmap in one HMU (fits many parts; a fuller implementation
+        // would batch to the MDU). One HMU per solicit is correct if smaller than the MDU.
+        let batch: Vec<[u8; MAPHASH_LEN]> = self.map_hashes[start..].to_vec();
+        let seg = self.hmu_segment;
+        self.hmu_segment += 1;
+        build_hmu(&self.hash, seg, &batch)
+    }
+
+    /// The resource hash.
+    pub fn resource_hash(&self) -> [u8; 32] {
+        self.hash
+    }
+
+    /// The proof the receiver must return for a correct transfer.
+    pub fn expected_proof(&self) -> [u8; 32] {
+        self.expected_proof
+    }
+
+    /// Total parts.
+    pub fn total_parts(&self) -> usize {
+        self.map_hashes.len()
     }
 }
 
@@ -681,6 +969,103 @@ mod tests {
     fn repacks_to_the_exact_captured_bytes() {
         let a = Advertisement::parse(&adv_bytes()).unwrap();
         assert_eq!(a.pack(), adv_bytes());
+    }
+
+    #[test]
+    fn request_codec_round_trips() {
+        let rh = [0x11u8; 32];
+        let wanted = [[1u8; 4], [2u8; 4], [3u8; 4]];
+        let r = parse_request(&build_request(&rh, &wanted)).unwrap();
+        assert!(!r.exhausted);
+        assert_eq!(r.last_map_hash, None);
+        assert_eq!(r.resource_hash, rh);
+        assert_eq!(r.wanted, wanted);
+
+        let last = [9u8; 4];
+        let e = parse_request(&build_exhausted_request(&last, &rh, &wanted)).unwrap();
+        assert!(e.exhausted);
+        assert_eq!(e.last_map_hash, Some(last));
+        assert_eq!(e.resource_hash, rh);
+        assert_eq!(e.wanted, wanted);
+    }
+
+    #[test]
+    fn hmu_codec_round_trips() {
+        let rh = [0x22u8; 32];
+        let hashes = [[0xAu8; 4], [0xBu8; 4], [0xCu8; 4]];
+        let h = parse_hmu(&build_hmu(&rh, 1, &hashes)).unwrap();
+        assert_eq!(h.resource_hash, rh);
+        assert_eq!(h.segment, 1);
+        assert_eq!(h.hashes, hashes);
+    }
+
+    /// The captured RNS HMU decodes to the known structure.
+    #[test]
+    fn hmu_matches_captured_rns() {
+        let hmu = hex::decode(
+            "34fa88d9f5bbe24374673ed08a7a1748c8cef5a281c5d82866f530026d863a08\
+             9201c43456db7769dec46a395226df3ef3d0ac23c4ef932b3b5626381e0ef732\
+             1238cf007f73a344c91aa2590e7ec740c3c3ea1fe51bc895",
+        )
+        .unwrap();
+        let h = parse_hmu(&hmu).unwrap();
+        assert_eq!(h.segment, 1);
+        assert_eq!(h.hashes.len(), 13);
+        assert_eq!(hex::encode(h.resource_hash), "34fa88d9f5bbe24374673ed08a7a1748c8cef5a281c5d82866f530026d863a08");
+    }
+
+    /// A >74-part resource round-trips sender -> receiver through the windowed HMU path,
+    /// entirely in-process (no RNS): advertise, request windows, solicit + ingest HMUs,
+    /// serve, reassemble.
+    #[test]
+    fn windowed_sender_receiver_round_trip() {
+        use crate::destination::DestinationName;
+        use crate::identity::PrivateIdentity;
+        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
+
+        let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let (pending, req) = PendingLink::open(
+            DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
+            *dest_id.public(),
+            &[0x33; 64],
+            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        );
+        let (recv_link, proof_pkt) =
+            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
+                .unwrap();
+        let send_link = pending.prove(&proof_pkt).unwrap();
+
+        // ~120 parts of data.
+        let data: Vec<u8> = (0..55_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8).collect();
+        let rh = [0xAB, 0xCD, 0xEF, 0x01];
+        let token = send_link.seal(&content(&data, &rh), &[7u8; 16]);
+        let mut out = Outgoing::new(&data, &token, rh, false);
+        assert!(out.total_parts() > HASHMAP_MAX_PARTS);
+
+        let mut inc = Incoming::new(&out.advertisement()).unwrap();
+        // Drive the windowed exchange to completion.
+        loop {
+            if inc.is_complete() {
+                break;
+            }
+            let want = inc.missing_known();
+            if !want.is_empty() {
+                let req = parse_request(&inc.request(&want)).unwrap();
+                for part in out.serve(&req) {
+                    inc.accept_part(&part);
+                }
+            } else if inc.needs_hmu() {
+                let solicit = parse_request(&inc.solicit_hmu()).unwrap();
+                let last = solicit.last_map_hash.unwrap();
+                let hmu = parse_hmu(&out.hmu_after(&last)).unwrap();
+                assert!(inc.ingest_hmu(&hmu) > 0);
+            } else {
+                panic!("stuck: not complete, nothing to request, no HMU needed");
+            }
+        }
+        let recovered = inc.recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap()).unwrap();
+        assert_eq!(recovered, data);
+        assert_eq!(inc.proof(&recovered), out.expected_proof());
     }
 
     #[test]
