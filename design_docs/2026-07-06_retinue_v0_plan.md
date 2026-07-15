@@ -21,22 +21,39 @@ founder stepped back December 2025, community forks).
 
 ## Goal
 
-A library crate that lets a host process *be* a Reticulum endpoint,
-wire-compatible with RNS 1.3.x: hold an identity, announce it, resolve peers
-from announces, establish links, exchange packets and resources. Embedding is
-the product; the first consumer is Mere's `transport` crate behind its
-`Transport` trait, replacing the Beechat pin without changing the probe's shape
+A library crate implementing the Reticulum protocol, wire-compatible with RNS 1.3.x:
+hold an identity, announce it, resolve peers, establish links, exchange packets and
+resources, **and route** (act as a transport node: path table, announce propagation,
+packet forwarding, link transport). Embedding is the product; the first consumer is
+Mere's `transport` crate behind its `Transport` trait, replacing the Beechat pin
 (deterministic identity from a seed, announce-bound peer ids, ALPN-to-destination
-mapping, bilateral streams).
+mapping, bilateral streams). Routing (in scope as of 2026-07-15) additionally lets a
+retinue node carry traffic for a small mesh, not only accompany one peer.
 
-## Non-goals
+## Scope change 2026-07-15: full RNS protocol parity
 
-- **Routing.** No transport-node behavior; a retinue accompanies one peer.
-- **LXMF.** Message-layer protocols sit above this crate (a possible later
-  `lxmf-wire`-shaped sibling, only if Reticulum-world interop is wanted).
-- **Daemon.** No standalone process, no RPC surface; library embed only.
-- **Every interface type.** TCP first; serial/RNode/LoRa later; BLE out of
-  scope for v0.
+Mark decided routing, and the whole Reticulum protocol spec, is in scope. retinue is
+no longer endpoint-scoped: the target is a complete RNS transport stack — identity,
+announce, link, resource, **transport-node routing** (path table, announce
+propagation, packet forwarding, link transport), **IFAC**, full **ratchet** handling,
+and the remaining **interface types** over time. The endpoint work (R0–R5) is the
+foundation; routing and the other full-spec items are the phases beyond it.
+
+Boundary that still holds: "the spec" means the **Reticulum protocol** (transport +
+destinations + links + resources + identity + interfaces, per reticulum.network/manual).
+**LXMF stays out** — it is an application/message layer *above* Reticulum, a separate
+`lxmf`-shaped sibling if ever wanted, not part of the RNS stack.
+
+Open: the **name**. "retinue" was chosen to encode the endpoint-only, non-routing
+stance ("accompanies one peer, does not carry others' traffic"). With routing in
+scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
+
+## Non-goals (revised)
+
+- **LXMF and application/message layers.** Above the RNS stack; a separate sibling.
+- **Daemon.** No standalone process by default; library embed first. (A `rnsd`-style
+  transport-node binary becomes plausible once routing lands, but it is not the
+  default shape.)
 
 ## Reference discipline
 
@@ -225,8 +242,34 @@ mapping, bilateral streams).
 
   Done-condition unchanged: Mere's reticulum-lane tests pass on retinue with the
   Beechat dependency deleted.
-- **Later, unscheduled:** serial/RNode interface, an `lxmf`-wire sibling for
-  Reticulum-world mail interop, routing (probably never).
+
+## Full-spec phases (added 2026-07-15, beyond the endpoint foundation)
+
+These follow R0–R5 and bring retinue to RNS protocol parity. Sequencing is a
+proposal, not fixed.
+
+- **R6 — multi-interface endpoint.** The shared prerequisite for both routing and
+  mere's multi-peer transport: a node that attaches to several interfaces and holds
+  many links, routing packets between them. The current `Endpoint` is point-to-point;
+  this generalises it. Everything below depends on it.
+- **R7 — transport-node routing.** Path table (destination → next-hop interface +
+  transport id + hops + expiry, learned from announces); announce propagation
+  (re-emit with hops+1, dedup via a packet-hash seen-set, hop limit, the ~2% bandwidth
+  rule); packet forwarding (header-type-2 rewrite toward the next hop); link transport
+  (record link-request hashes with their inbound interface so proofs and link data
+  forward along the reverse path); path-request responses. The primitives already
+  exist: header-type-2 codec, `Packet::hash`, announce parsing, the address book.
+  Done when: retinue routes between two RNS peers two hops apart (the original R2
+  done-condition, now actually reachable), verified live.
+- **R8 — IFAC.** Interface access codes: derive the shared Ed25519 signing identity
+  from a passphrase/network name, sign every outbound packet, verify + drop on inbound.
+  1–64-byte codes. retinue already decodes the IFAC flag.
+- **R9 — ratchet encryption.** Encrypt single packets to a destination's current
+  ratchet (retinue already parses + stores ratchets from announces); ratchet rotation
+  and retention. Forward secrecy for the asymmetric-packet path.
+- **R10 — remaining interfaces.** Serial/KISS, RNode, UDP, and the others, behind the
+  same interface seam as TCP.
+- **Still out:** LXMF and application/message layers (separate sibling).
 
 ## Decisions (2026-07-13)
 
