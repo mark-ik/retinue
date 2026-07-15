@@ -47,20 +47,25 @@ def main() -> int:
         dest.set_proof_strategy(RNS.Destination.PROVE_ALL)
         dest.accepts_links(True)
         def resource_cb(resource):
-            print(f"  RNS: RESOURCE received status={resource.status} "
-                  f"size={getattr(resource,'total_size',None)}")
+            print(f"  RNS: RESOURCE concluded status={resource.status} "
+                  f"(COMPLETE=6, FAILED=7)")
             try:
                 data = resource.data.read() if hasattr(resource.data, "read") else bytes(resource.data)
                 got["data"] = data
                 print(f"  RNS: resource data {len(data)} bytes, first16={data[:16].hex()}")
             except Exception as e:
                 print(f"  RNS: read err {e}")
+            got["status"] = resource.status
             done.set()
-        def resource_started(resource):
-            print("  RNS: resource advertised, accepting")
+        def accept_decision(resource):
+            print("  RNS: resource advertised -> accepting (ACCEPT_APP = in-RAM)")
+            return True
+        # ACCEPT_APP keeps the received resource in memory and delivers it to the callback,
+        # avoiding RNS's on-disk assembly path (which fought the ephemeral test config).
+        # set_resource_callback is the accept-decision hook (return True to accept).
         dest.set_link_established_callback(lambda l: (
-            l.set_resource_strategy(RNS.Link.ACCEPT_ALL),
-            l.set_resource_started_callback(resource_started),
+            l.set_resource_strategy(RNS.Link.ACCEPT_APP),
+            l.set_resource_callback(accept_decision),
             l.set_resource_concluded_callback(resource_cb),
         ))
         print(f"RNS receiver {dest.hash.hex()}\n")
@@ -68,12 +73,17 @@ def main() -> int:
         done.wait(timeout=30)
         time.sleep(1)
         expected = bytes(((i * 7 + 3) & 0xff) for i in range(300))
-        ok = got.get("data") == expected
+        joined = "\n".join(lines)
+        data_ok = got.get("data") == expected
+        rns_complete = got.get("status") == 6  # RNS.Resource.COMPLETE
+        retinue_verified = "PROOF_VERIFIED" in joined
         print("\n" + "=" * 68)
-        print(f"RNS received retinue's resource intact: {'PASS' if ok else 'FAIL'}")
-        if got.get("data") is not None and not ok:
-            print(f"  got {len(got['data'])} bytes, expected {len(expected)}")
+        print(f"RNS received retinue's resource intact: {'PASS' if data_ok else 'FAIL'}")
+        print(f"RNS concluded COMPLETE:                 {'PASS' if rns_complete else 'FAIL'}")
+        print(f"retinue verified RNS's returned proof:  {'PASS' if retinue_verified else 'FAIL'}")
         print("=" * 68)
+        ok = data_ok and rns_complete and retinue_verified
+        print(f"R4 RESOURCE SEND INTEROP: {'PASS' if ok else 'FAIL'}")
         return 0 if ok else 1
     finally:
         try: proc.wait(timeout=8)

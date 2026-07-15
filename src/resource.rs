@@ -102,6 +102,22 @@ pub fn data_from_content(content: &[u8]) -> Result<&[u8]> {
     content.get(RANDOM_HASH_LEN..).ok_or(Error::Truncated)
 }
 
+/// Parse a resource proof packet payload: `resource_hash(32) || proof(32)`, sent
+/// unencrypted. Returns `(resource_hash, proof)`, or `None` if it is not 64 bytes.
+///
+/// A sender compares the returned proof against the value it precomputed with [`proof`]; a
+/// match means the receiver reassembled the resource intact. Verified against RNS 1.3.8.
+pub fn parse_proof(payload: &[u8]) -> Option<([u8; 32], [u8; 32])> {
+    if payload.len() != 64 {
+        return None;
+    }
+    let mut h = [0u8; 32];
+    let mut p = [0u8; 32];
+    h.copy_from_slice(&payload[..32]);
+    p.copy_from_slice(&payload[32..]);
+    Some((h, p))
+}
+
 /// The proof a receiver returns: `SHA256(uncompressed_data || resource_hash)`. The sender
 /// checks it against the value it precomputed. Verified against RNS 1.3.8.
 pub fn proof(data: &[u8], resource_hash: &[u8; 32]) -> [u8; 32] {
@@ -665,6 +681,16 @@ mod tests {
     fn repacks_to_the_exact_captured_bytes() {
         let a = Advertisement::parse(&adv_bytes()).unwrap();
         assert_eq!(a.pack(), adv_bytes());
+    }
+
+    #[test]
+    fn proof_packet_round_trips() {
+        let h = [0x11; 32];
+        let p = [0x22; 32];
+        let mut payload = h.to_vec();
+        payload.extend_from_slice(&p);
+        assert_eq!(parse_proof(&payload), Some((h, p)));
+        assert_eq!(parse_proof(&payload[..63]), None);
     }
 
     #[cfg(feature = "compression")]

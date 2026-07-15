@@ -104,7 +104,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("REQ for {} parts, sent {}", hashes.len() / 4, sent);
                 }
             }
-            0x05 => println!("GOT_PROOF {}", dec.as_ref().map(hex::encode).unwrap_or_default()),
+            0x05 => {
+                // The proof is sent unencrypted: resource_hash(32) || proof(32).
+                match resource::parse_proof(&packet.payload) {
+                    Some((_h, proof)) if proof == expected_proof => println!("PROOF_VERIFIED"),
+                    Some(_) => println!("PROOF_MISMATCH"),
+                    None => println!("PROOF_MALFORMED"),
+                }
+            }
             _ => {}
         }
     }
