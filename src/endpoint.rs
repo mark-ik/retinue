@@ -24,7 +24,7 @@ use std::task::{Context, Poll};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use crate::address_book::AddressBook;
 use crate::announce::{self, Announce, RAND_HASH_LEN};
@@ -250,10 +250,14 @@ impl Shared {
 }
 
 /// A Reticulum endpoint over any number of interfaces.
+///
+/// All methods take `&self` (the receivers are behind async mutexes), so an endpoint can be
+/// wrapped in an `Arc` and shared: a host transport can call `open`/`announce` from one task
+/// while another drives `accept`/`next_announcement`.
 pub struct Endpoint {
     shared: Arc<Shared>,
-    accepted_rx: mpsc::UnboundedReceiver<Accepted>,
-    announce_rx: mpsc::UnboundedReceiver<PeerAnnounce>,
+    accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<Accepted>>,
+    announce_rx: AsyncMutex<mpsc::UnboundedReceiver<PeerAnnounce>>,
 }
 
 impl Endpoint {
@@ -292,8 +296,8 @@ impl Endpoint {
 
         Self {
             shared,
-            accepted_rx,
-            announce_rx,
+            accepted_rx: AsyncMutex::new(accepted_rx),
+            announce_rx: AsyncMutex::new(announce_rx),
         }
     }
 
@@ -422,22 +426,26 @@ impl Endpoint {
     }
 
     /// Wait for the next inbound link, surfaced as a stream.
-    pub async fn accept(&mut self) -> io::Result<LinkStream> {
+    pub async fn accept(&self) -> io::Result<LinkStream> {
         Ok(self.accept_on_any().await?.stream)
     }
 
     /// Wait for the next inbound link, with the destination it targeted (an ALPN maps to a
     /// destination, so a host can dispatch by protocol).
-    pub async fn accept_on_any(&mut self) -> io::Result<Accepted> {
+    pub async fn accept_on_any(&self) -> io::Result<Accepted> {
         self.accepted_rx
+            .lock()
+            .await
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
     }
 
     /// The next validated announce, for building a host peer-id to destination map.
-    pub async fn next_announcement(&mut self) -> io::Result<PeerAnnounce> {
+    pub async fn next_announcement(&self) -> io::Result<PeerAnnounce> {
         self.announce_rx
+            .lock()
+            .await
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))

@@ -17,7 +17,7 @@ const IDENTITY_SEED: [u8; 64] = [0x11; 64];
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let identity = PrivateIdentity::from_secret_bytes(&IDENTITY_SEED);
-    let mut endpoint = Endpoint::new(identity);
+    let endpoint = Endpoint::new(identity);
     let addr = endpoint.listen_tcp("127.0.0.1:0".parse()?).await?;
     println!("LISTENING {}", addr.port());
 

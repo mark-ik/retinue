@@ -23,7 +23,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if role == "responder" {
         let id = PrivateIdentity::from_secret_bytes(&RESPONDER_SEED);
-        let mut ep = Endpoint::new(id.clone());
+        let ep = Endpoint::new(id.clone());
         ep.attach_tcp_client(addr).await?;
         println!("RESPONDER_DEST {}", name.destination_hash(id.public()));
         ep.register(name.clone(), b"peer");
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         // Initiator: distinct identity; learn the responder's destination via announce.
         let id = PrivateIdentity::from_secret_bytes(&[0x24; 64]);
-        let mut ep = Endpoint::new(id);
+        let ep = Endpoint::new(id);
         ep.attach_tcp_client(addr).await?;
         // Announce ourselves too so the transport node has a reverse path to us.
         let me = DestinationName::new("retinue", ["init"]);
