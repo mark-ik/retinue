@@ -14,11 +14,11 @@
 //! for a host transport reaching many peers. This is the seam a host implements its own
 //! transport trait against; see the crate root.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -42,6 +42,13 @@ const WRITE_CHUNK: usize = crate::packet::ENCRYPTED_MDU - 16;
 
 /// In-memory buffer for a stream's inbound side.
 const DUPLEX_BUF: usize = 64 * 1024;
+
+/// Maximum hops an announce or packet may travel before a transport node drops it. RNS's
+/// default `m` (`PATHFINDER_M`).
+const MAX_HOPS: u8 = 128;
+
+/// How many recent announce packet-hashes to remember for de-duplication.
+const SEEN_ANNOUNCES: usize = 4096;
 
 /// A bidirectional byte stream over a link.
 ///
@@ -151,6 +158,21 @@ struct Shared {
     /// the shell seeds this from the clock and the caller can substitute a CSPRNG.
     iv_seed: Mutex<u64>,
     next_iface_id: AtomicU32,
+    /// Whether this endpoint acts as a transport node (forwards announces and packets).
+    routing: AtomicBool,
+    /// Learned routes: destination → the interface to reach it and its hop count. Populated
+    /// from announces.
+    path_table: Mutex<HashMap<AddressHash, PathEntry>>,
+    /// Recently-seen announce packet hashes, for de-duplication (a ring of the last
+    /// [`SEEN_ANNOUNCES`]).
+    seen_announces: Mutex<(HashSet<AddressHash>, VecDeque<AddressHash>)>,
+}
+
+/// A learned route to a destination.
+#[derive(Clone, Copy)]
+struct PathEntry {
+    iface: InterfaceId,
+    hops: u8,
 }
 
 impl Shared {
@@ -161,11 +183,48 @@ impl Shared {
         }
     }
 
+    /// Send a packet out every interface except one (announce forwarding: never back the
+    /// way it came).
+    fn broadcast_except(&self, except: InterfaceId, pkt: Packet) {
+        for i in self.interfaces.lock().unwrap().iter() {
+            if i.id != except {
+                let _ = i.outbound.send(pkt.clone());
+            }
+        }
+    }
+
     /// Send a packet out one interface.
     fn send_on(&self, iface: InterfaceId, pkt: Packet) {
         if let Some(i) = self.interfaces.lock().unwrap().iter().find(|i| i.id == iface) {
             let _ = i.outbound.send(pkt);
         }
+    }
+
+    /// Record that `dest` is reachable via `iface` at `hops`, keeping the shortest route.
+    fn learn_path(&self, dest: AddressHash, iface: InterfaceId, hops: u8) {
+        let mut t = self.path_table.lock().unwrap();
+        match t.get(&dest) {
+            Some(e) if e.hops <= hops => {}
+            _ => {
+                t.insert(dest, PathEntry { iface, hops });
+            }
+        }
+    }
+
+    /// Whether this announce (by packet hash) is new; records it if so.
+    fn announce_is_new(&self, hash: AddressHash) -> bool {
+        let mut g = self.seen_announces.lock().unwrap();
+        if g.0.contains(&hash) {
+            return false;
+        }
+        g.0.insert(hash);
+        g.1.push_back(hash);
+        if g.1.len() > SEEN_ANNOUNCES
+            && let Some(old) = g.1.pop_front()
+        {
+            g.0.remove(&old);
+        }
+        true
     }
 }
 
@@ -196,6 +255,9 @@ impl Endpoint {
             pending_links: Mutex::new(HashMap::new()),
             iv_seed: Mutex::new(seed_iv()),
             next_iface_id: AtomicU32::new(0),
+            routing: AtomicBool::new(false),
+            path_table: Mutex::new(HashMap::new()),
+            seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
         });
 
         let router = Arc::clone(&shared);
@@ -246,6 +308,23 @@ impl Endpoint {
     /// Number of interfaces currently attached.
     pub fn interface_count(&self) -> usize {
         self.shared.interfaces.lock().unwrap().len()
+    }
+
+    /// Act as a transport node: forward announces (hops+1, de-duplicated, never back the way
+    /// they came) and forward packets toward learned destinations. Off by default, since an
+    /// endpoint carries only its own traffic unless it opts in.
+    pub fn enable_routing(&self) {
+        self.shared.routing.store(true, Ordering::Relaxed);
+    }
+
+    /// The interface a learned destination is reachable over, and its hop count.
+    pub fn route_to(&self, dest: AddressHash) -> Option<(InterfaceId, u8)> {
+        self.shared
+            .path_table
+            .lock()
+            .unwrap()
+            .get(&dest)
+            .map(|e| (e.iface, e.hops))
     }
 
     /// This endpoint's public identity.
@@ -386,11 +465,22 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         PacketType::Announce => {
             if let Ok(a) = Announce::decode(&pkt) {
                 shared.address_book.lock().unwrap().ingest(&a);
+                shared.learn_path(a.destination, iface, pkt.hops);
                 let _ = shared.announce_tx.send(PeerAnnounce {
                     destination: a.destination,
                     identity: a.identity,
                     app_data: a.app_data,
                 });
+                // As a transport node, propagate the announce onward: hops+1, out every
+                // other interface, once per announce (de-duplicated by packet hash).
+                if shared.routing.load(Ordering::Relaxed)
+                    && pkt.hops < MAX_HOPS
+                    && shared.announce_is_new(pkt.hash())
+                {
+                    let mut fwd = pkt;
+                    fwd.hops += 1;
+                    shared.broadcast_except(iface, fwd);
+                }
             }
         }
         PacketType::LinkRequest => {

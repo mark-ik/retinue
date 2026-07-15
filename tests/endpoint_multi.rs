@@ -43,6 +43,46 @@ async fn spawn_leaf(seed: [u8; 64], aspect: &'static str, hub_addr: std::net::So
     });
 }
 
+/// A transport-node hub forwards announces between its interfaces, so a leaf on one side
+/// learns a destination announced on the other (hops incremented).
+#[tokio::test]
+async fn transport_node_forwards_announces() {
+    let hub = Endpoint::new(PrivateIdentity::from_secret_bytes(&[9u8; 64]));
+    let addr = hub.listen_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    hub.enable_routing();
+
+    let a_id = PrivateIdentity::from_secret_bytes(&[2u8; 64]);
+    let mut a = Endpoint::new(a_id.clone());
+    a.attach_tcp_client(addr).await.unwrap();
+    let a_name = DestinationName::new("leaf", ["a"]);
+    let a_dest = a_name.destination_hash(a_id.public());
+
+    let b_id = PrivateIdentity::from_secret_bytes(&[3u8; 64]);
+    let b = Endpoint::new(b_id.clone());
+    b.attach_tcp_client(addr).await.unwrap();
+    let b_name = DestinationName::new("leaf", ["b"]);
+    let b_dest = b_name.destination_hash(b_id.public());
+
+    // Both announce a few times (so the hub has both interfaces before forwarding).
+    for _ in 0..4 {
+        a.announce(&a_name, b"a");
+        b.announce(&b_name, b"b");
+        tokio::time::sleep(Duration::from_millis(120)).await;
+    }
+
+    // A should learn B's destination via the hub's forwarding.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    while a.resolve(b_dest).is_none() && tokio::time::Instant::now() < deadline {
+        let _ = tokio::time::timeout(Duration::from_millis(500), a.next_announcement()).await;
+    }
+    assert!(a.resolve(b_dest).is_some(), "A should learn B's dest via the hub");
+    assert!(b.resolve(a_dest).is_some(), "B should learn A's dest via the hub");
+
+    // The hub knows a route to both, and both are one hop away through it.
+    assert_eq!(hub.route_to(a_dest).map(|(_, h)| h), Some(0));
+    assert_eq!(hub.route_to(b_dest).map(|(_, h)| h), Some(0));
+}
+
 #[tokio::test]
 async fn hub_reaches_two_leaves_over_two_interfaces() {
     let hub_id = PrivateIdentity::from_secret_bytes(&[1u8; 64]);
