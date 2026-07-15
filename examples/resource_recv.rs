@@ -36,23 +36,27 @@ fn iv() -> [u8; 16] {
 }
 async fn send(i: &mut TcpInterface, p: &Packet) { i.send(p).await.expect("send"); }
 
-/// Assemble, decrypt, decompress, verify, and prove a completed resource.
-async fn finish(iface: &mut TcpInterface, l: &Link, inc: &Incoming) -> Result<(), Box<dyn std::error::Error>> {
+/// Assemble, decrypt, decompress, verify, and prove one completed segment. Returns the
+/// recovered segment body (to be concatenated across segments), or `None` on failure.
+async fn finish(
+    iface: &mut TcpInterface,
+    l: &Link,
+    inc: &Incoming,
+) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
     let token = inc.assemble_token()?;
     let decrypted = l.open(&token)?;
     match inc.recover(&decrypted) {
         Ok(data) => {
-            println!("ASSEMBLED token={} data={} compressed={}", token.len(), data.len(), inc.is_compressed());
+            println!("SEGMENT_ASSEMBLED token={} data={} compressed={}", token.len(), data.len(), inc.is_compressed());
             let proof = inc.proof(&data);
             send(iface, &l.resource_proof_packet(&inc.resource_hash(), &proof)).await;
-            println!("SENT_PROOF {}", hex::encode(proof));
-            // Report the payload hash so the driver can check integrity without the full dump.
-            println!("DATA_HASH {}", hex::encode(retinue::hash::full_hash(&data)));
-            println!("DATA_LEN {}", data.len());
+            Ok(Some(data))
         }
-        Err(e) => println!("RECOVER_FAILED {e}"),
+        Err(e) => {
+            println!("RECOVER_FAILED {e}");
+            Ok(None)
+        }
     }
-    Ok(())
 }
 
 #[tokio::main]
@@ -71,7 +75,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut link: Option<Link> = None;
     let mut incoming: Option<Incoming> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(40);
+    // Multi-segment accumulation: a resource above ~1 MB arrives as several segments, each
+    // its own advertisement (i = 1-based index, l = total). The full payload is their
+    // recovered bodies concatenated.
+    let mut assembled: Vec<u8> = Vec::new();
+    let mut this_segment = 0u64;
+    let mut total_segments = 1u64;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
 
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -102,13 +112,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     0x02 => {
                         let plain = l.decrypt(&packet)?;
                         let adv = Advertisement::parse(&plain)?;
-                        println!("ADV t={} d={} n={} hashmap={} compressed={}",
-                            adv.transfer_size, adv.data_size, adv.parts, adv.hashmap_parts(),
+                        println!("ADV segment {}/{} d={} n={} hashmap={} compressed={}",
+                            adv.i, adv.l, adv.data_size, adv.parts, adv.hashmap_parts(),
                             adv.flags & 0x02 != 0);
+                        this_segment = adv.i as u64;
+                        total_segments = adv.l as u64;
                         let inc = Incoming::new(&adv)?;
                         send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ,
                             &inc.request(&inc.missing_known()), &iv())).await;
-                        println!("REQUESTED {} known parts (of {})", inc.missing_known().len(), inc.total_parts());
+                        println!("REQUESTED {} known parts (of {}) [segment {}/{}]",
+                            inc.missing_known().len(), inc.total_parts(), this_segment, total_segments);
                         incoming = Some(inc);
                     }
                     // Part: a raw token slice.
@@ -116,13 +129,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(inc) = incoming.as_mut() {
                             inc.accept_part(&packet.payload);
                             if inc.is_complete() {
-                                finish(&mut iface, l, inc).await?;
-                                break;
+                                // Recover this segment, prove it, and append to the payload.
+                                if let Some(body) = finish(&mut iface, l, inc).await? {
+                                    assembled.extend_from_slice(&body);
+                                }
+                                incoming = None;
+                                if this_segment >= total_segments {
+                                    println!("ALL_SEGMENTS_DONE {} bytes", assembled.len());
+                                    println!("DATA_HASH {}", hex::encode(retinue::hash::full_hash(&assembled)));
+                                    println!("DATA_LEN {}", assembled.len());
+                                    break;
+                                }
+                                // else: wait for the next segment's advertisement.
                             } else if inc.needs_hmu() {
                                 // Advertised hashes exhausted; solicit the rest of the hashmap.
                                 send(&mut iface, &l.sealed_packet(CTX_RESOURCE_REQ,
                                     &inc.solicit_hmu(), &iv())).await;
-                                println!("SOLICIT_HMU (have {} of {})", inc.order_len(), inc.total_parts());
                             }
                         }
                     }

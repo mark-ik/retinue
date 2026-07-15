@@ -18,7 +18,7 @@ done = threading.Event()
 result = {}
 # A large, incompressible payload: forces MANY parts (well past the 74-hash advertisement
 # limit) so the windowed hashmap-update (HMU) path is exercised. auto_compress off below.
-PAYLOAD = bytes(((i * 2654435761) >> 8) & 0xff for i in range(120000))  # ~120 KB, 259 parts
+PAYLOAD = bytes(((i * 2654435761) >> 8) & 0xff for i in range(2_500_000))  # 2.5 MB -> multi-segment
 PAYLOAD_HASH = hashlib.sha256(PAYLOAD).hexdigest()
 
 

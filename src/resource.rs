@@ -615,12 +615,24 @@ impl Incoming {
 /// Splits a sealed token into parts, advertises the first [`HASHMAP_MAX_PARTS`] map hashes,
 /// serves part requests, and emits an [`Hmu`] when the receiver's hashmap runs out. Pair the
 /// advertisement and each served part / HMU with the link's framing in the shell.
+/// Bytes of payload per segment. A resource larger than this splits into multiple segments,
+/// each transferred (and proved) independently. `RNS.Resource.MAX_EFFICIENT_SIZE`.
+pub const MAX_SEGMENT_SIZE: usize = 1_048_575;
+
 pub struct Outgoing {
     hash: [u8; 32],
+    /// The whole-resource identity, carried in every segment's advertisement `o` field. For
+    /// a single-segment resource this equals `hash`; across a multi-segment resource it is
+    /// the FIRST segment's hash, shared, so the receiver groups the segments.
+    original_hash: [u8; 32],
     random_hash: [u8; RANDOM_HASH_LEN],
-    data_size: u64,
     transfer_size: u64,
     compressed: bool,
+    /// 1-based segment index and total segment count. Single-segment resources are (1, 1).
+    segment_index: i64,
+    total_segments: i64,
+    /// The full resource's data size, carried in every segment's advertisement `d` field.
+    total_data_size: u64,
     /// All part map hashes, in transfer order.
     map_hashes: Vec<[u8; MAPHASH_LEN]>,
     /// Parts (raw token slices) keyed by map hash.
@@ -644,15 +656,36 @@ impl Outgoing {
         }
         Self {
             hash,
+            original_hash: hash,
             random_hash,
-            data_size: data.len() as u64,
             transfer_size: token.len() as u64,
             compressed,
+            segment_index: 1,
+            total_segments: 1,
+            total_data_size: data.len() as u64,
             expected_proof: proof(data, &hash),
             map_hashes,
             by_hash,
             hmu_segment: 1,
         }
+    }
+
+    /// Mark this as segment `index` of `total` in a larger resource whose full payload is
+    /// `total_data_size` bytes and whose identity is `original_hash` (the FIRST segment's
+    /// hash, shared across all segments so the receiver groups them). The advertisement's
+    /// `i`/`l`/`d`/`o` fields carry these. Verified against RNS 1.3.8.
+    pub fn with_segment(
+        mut self,
+        index: i64,
+        total: i64,
+        total_data_size: u64,
+        original_hash: [u8; 32],
+    ) -> Self {
+        self.segment_index = index;
+        self.total_segments = total;
+        self.total_data_size = total_data_size;
+        self.original_hash = original_hash;
+        self
     }
 
     /// The advertisement, carrying the first [`HASHMAP_MAX_PARTS`] map hashes.
@@ -668,15 +701,15 @@ impl Outgoing {
         }
         Advertisement {
             transfer_size: self.transfer_size,
-            data_size: self.data_size,
+            data_size: self.total_data_size,
             parts: self.map_hashes.len() as u64,
             resource_hash: self.hash.to_vec(),
-            original_hash: self.hash.to_vec(),
+            original_hash: self.original_hash.to_vec(),
             random_hash: self.random_hash.to_vec(),
             flags,
             hashmap,
-            i: 1,
-            l: 1,
+            i: self.segment_index,
+            l: self.total_segments,
             q: None,
         }
     }
@@ -1066,6 +1099,67 @@ mod tests {
         let recovered = inc.recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap()).unwrap();
         assert_eq!(recovered, data);
         assert_eq!(inc.proof(&recovered), out.expected_proof());
+    }
+
+    /// A multi-segment resource round-trips sender -> receiver in-process: two segments
+    /// sharing one original_hash, driven windowed, recovered bodies concatenated.
+    #[test]
+    fn multi_segment_round_trip() {
+        use crate::destination::DestinationName;
+        use crate::identity::PrivateIdentity;
+        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
+
+        let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let (pending, req) = PendingLink::open(
+            DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
+            *dest_id.public(),
+            &[0x33; 64],
+            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        );
+        let (recv_link, proof_pkt) =
+            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
+                .unwrap();
+        let send_link = pending.prove(&proof_pkt).unwrap();
+
+        // Two segments of ~90 parts each (small "MAX_SEGMENT_SIZE" for the test).
+        const SEG: usize = 40_000;
+        let data: Vec<u8> = (0..90_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8).collect();
+        let seg0_rh = [1u8, 2, 3, 4];
+        let original = resource_hash(&data[..SEG.min(data.len())], &seg0_rh);
+
+        let mut assembled = Vec::new();
+        let total_segs = data.chunks(SEG).count() as i64;
+        for (idx, chunk) in data.chunks(SEG).enumerate() {
+            let rh = [(idx as u8) + 1, 2, 3, 4];
+            let token = send_link.seal(&content(chunk, &rh), &[7u8; 16]);
+            let mut out = Outgoing::new(chunk, &token, rh, false)
+                .with_segment(idx as i64 + 1, total_segs, data.len() as u64, original);
+            // Check the advertisement carries the shared identity and total size.
+            let adv = out.advertisement();
+            assert_eq!(adv.original_hash, original.to_vec());
+            assert_eq!(adv.data_size, data.len() as u64);
+
+            let mut inc = Incoming::new(&adv).unwrap();
+            loop {
+                if inc.is_complete() {
+                    break;
+                }
+                let want = inc.missing_known();
+                if !want.is_empty() {
+                    let r = parse_request(&inc.request(&want)).unwrap();
+                    for part in out.serve(&r) {
+                        inc.accept_part(&part);
+                    }
+                } else {
+                    let s = parse_request(&inc.solicit_hmu()).unwrap();
+                    let hmu = parse_hmu(&out.hmu_after(&s.last_map_hash.unwrap())).unwrap();
+                    inc.ingest_hmu(&hmu);
+                }
+            }
+            let body = inc.recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap()).unwrap();
+            assembled.extend_from_slice(&body);
+        }
+        assert_eq!(assembled, data);
     }
 
     #[test]

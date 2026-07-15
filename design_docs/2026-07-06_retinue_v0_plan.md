@@ -166,13 +166,35 @@ scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
   shapes; no msgpack dependency was added.
 
   **R3 is now complete.**
-- **R4 — resources. PROTOCOL REVERSED 2026-07-13; implementation pending.** The
-  resource transfer mechanism over links. Captured a real RNS 4 KB resource send
-  and reversed the advertisement fully (see the wire reference, section 0.2): a
-  msgpack map with transfer/data sizes, part count, resource/original hashes, a
-  per-part hashmap, and flags. The flow is a windowed exchange, advertisement →
-  request → parts → proof, with bz2 compression (`t < d` in the capture) and
-  hashmap updates for large resources.
+- **R4 — resources. COMPLETE 2026-07-15, both directions, multi-megabyte.** The
+  full windowed transfer state machine, verified against real RNS with a **2.5 MB
+  multi-segment resource that round-trips intact both ways** (RNS concludes
+  COMPLETE). Done-condition met. What landed on top of the receiver base below:
+  - **bz2 compression** (default-on `compression` feature, pure-Rust `libbz2-rs-sys`,
+    no C toolchain). retinue decompresses RNS's own bz2 and RNS decompresses retinue's.
+  - **windowed part requests + hashmap updates (HMU)**: request
+    `0x00 || hash || wanted*`; exhausted solicit
+    `0xff || last_map_hash(4) || hash || wanted*` (the leading hash tells the sender
+    where the HMU resumes); HMU (ctx 0x04, sealed)
+    `resource_hash(32) || msgpack([segment, hashmap_bin(4*M)])`. `HASHMAP_MAX_PARTS = 74`
+    per advertisement; the receiver grows a window.
+  - **segmentation** above `MAX_SEGMENT_SIZE = 1048575`: each segment its own
+    advertisement (`i` = 1-based index, `l` = total, `d` = total data size), all
+    sharing one `original_hash` (segment 1's hash) so the receiver groups them; the
+    receiver proves each segment and concatenates the recovered bodies.
+  - `src/resource.rs`: `Incoming` (windowed receiver), `Outgoing` (windowed sender,
+    `with_segment`), `Request`/`Hmu` codecs, `parse_proof`. Self-contained unit tests
+    round-trip windowed and multi-segment transfers with no RNS.
+
+  Gates: `interop_resource_recv.py` (2.5 MB / 3 segments received, HMU, RNS COMPLETE),
+  `interop_send_multiseg.py` (2.5 MB / 3 segments sent, RNS COMPLETE), plus the
+  compressed and single-segment send gates. 42 tests green. Deferred as non-essential:
+  dynamic window *sizing* (retinue requests a fixed window; RNS tolerates it), retries,
+  and explicit cancellation.
+
+  Historical notes (how it was built): protocol reversed 2026-07-13; the advertisement
+  is a msgpack map with transfer/data sizes, part count, resource/original hashes, a
+  per-part hashmap, and flags.
 
   **Advertisement codec DONE 2026-07-13.** `src/resource.rs` parses and builds the
   advertisement map, with its own small msgpack map codec (fixmap, uint, int, nil,
@@ -197,15 +219,11 @@ scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
   requests the parts, reassembles, decrypts, strips the random-hash prefix, verifies
   against the resource hash, and returns the proof; **RNS concludes COMPLETE**.
 
-  Remaining for a full R4: compression (bz2, a dependency) for compressed transfers;
-  multi-segment resources (incremental hashmap via `RESOURCE_HMU`); dynamic windowing,
-  retries, and cancellation; and the sender's completion (RNS-as-receiver wrote the
-  assembled resource to a disk path its ephemeral test config could not satisfy, an
-  RNS-side harness quirk, not a retinue defect, that blocked capturing RNS's own proof).
-  The sender construction is implemented and RNS accepts it through to assembly.
+  (Resolved during completion: the sender's proof capture needed RNS's `ACCEPT_APP`
+  in-RAM strategy; `ACCEPT_ALL` routed received resources through a disk path the
+  ephemeral test config could not satisfy.)
 
-  Done-condition unchanged: a multi-megabyte resource round-trips retinue ↔ oracle
-  intact both ways. Tooling: `oracle/capture_resource*.py`, `interop_resource_recv.py`,
+  Tooling: `oracle/capture_resource*.py`, `interop_resource_recv.py`,
   `examples/resource_{probe,recv,send_probe}.rs`.
 - **R5 — Mere adoption. RUNTIME DONE 2026-07-14; mere wiring is the remaining step.**
   The seam mere implements its `Transport` trait against is built and RNS-verified:
