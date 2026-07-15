@@ -16,12 +16,10 @@ const IDENTITY_SEED: [u8; 64] = [0x11; 64];
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (listener, addr) = Endpoint::bind_addr("127.0.0.1:0".parse()?).await?;
-    println!("LISTENING {}", addr.port());
-
-    let (stream, _) = listener.accept().await?;
     let identity = PrivateIdentity::from_secret_bytes(&IDENTITY_SEED);
-    let mut endpoint = Endpoint::from_listener_stream(stream, identity)?;
+    let mut endpoint = Endpoint::new(identity);
+    let addr = endpoint.listen_tcp("127.0.0.1:0".parse()?).await?;
+    println!("LISTENING {}", addr.port());
 
     // Register so inbound link requests to this destination are accepted (also announces
     // once). An inbound request during the re-announce loop is buffered by the router, so

@@ -1,20 +1,24 @@
 //! The endpoint runtime: the tokio shell that turns the R0–R4 primitives into a working
 //! peer.
 //!
-//! An [`Endpoint`] owns a TCP interface, an identity, and an [`AddressBook`]. A background
-//! router reads packets and dispatches them: announces populate the address book, inbound
-//! link requests are proved and surfaced as connections, and link data is routed to the
-//! [`LinkStream`] for its link. Links are exposed as [`LinkStream`]s, which implement
-//! [`AsyncRead`] + [`AsyncWrite`], so a consumer gets an ordinary bidirectional byte stream.
+//! An [`Endpoint`] holds an identity, an [`AddressBook`], and any number of **interfaces**
+//! (TCP connections, dialed or accepted). A background router reads packets from every
+//! interface, tagged with the interface they arrived on, and dispatches them: announces
+//! populate the address book, inbound link requests are proved and surfaced as connections,
+//! and link data is routed to the [`LinkStream`] for its link. Announces are broadcast on
+//! every interface; a link's traffic goes back out the interface it came in on. Links are
+//! exposed as [`LinkStream`]s (`AsyncRead` + `AsyncWrite`), an ordinary bidirectional byte
+//! stream.
 //!
-//! This is the seam a host implements its own transport trait against; see the crate root.
-//! It is deliberately point-to-point over one interface connection, which is the shape the
-//! first consumer (mere) needs; multi-interface routing is a non-goal.
+//! Multiple interfaces are the substrate for routing (a node that forwards between them) and
+//! for a host transport reaching many peers. This is the seam a host implements its own
+//! transport trait against; see the crate root.
 
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -100,9 +104,22 @@ pub struct Accepted {
 }
 
 /// A live link and the channel that feeds its stream inbound bytes.
+/// Identifies one attached interface (one TCP connection).
+pub type InterfaceId = u32;
+
+/// An attached interface: the channel its writer task drains.
+struct Iface {
+    id: InterfaceId,
+    outbound: mpsc::UnboundedSender<Packet>,
+}
+
 struct LinkEntry {
     link: Link,
     inbound: mpsc::UnboundedSender<Vec<u8>>,
+    /// The interface this link's traffic goes out on. Recorded for routing (R7), where a
+    /// forwarded link's return traffic must go back the way it came.
+    #[allow(dead_code)]
+    iface: InterfaceId,
 }
 
 type Links = Arc<Mutex<HashMap<AddressHash, LinkEntry>>>;
@@ -118,21 +135,41 @@ struct Shared {
     address_book: Mutex<AddressBook>,
     links: Links,
     registered: Mutex<Vec<Registered>>,
-    outbound: mpsc::UnboundedSender<Packet>,
+    /// Every attached interface. Announces broadcast to all; link traffic targets one.
+    interfaces: Mutex<Vec<Iface>>,
+    /// The router's inbound channel: every interface's reader feeds `(interface, packet)`.
+    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
     /// Inbound accepted links (stream + destination), surfaced to `accept`.
     accepted_tx: mpsc::UnboundedSender<Accepted>,
     /// Validated announces, surfaced to `announcements`.
     announce_tx: mpsc::UnboundedSender<PeerAnnounce>,
-    /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake,
-    /// and the half-open link that verifies the proof.
-    pending: Mutex<HashMap<AddressHash, oneshot::Sender<Link>>>,
+    /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake
+    /// (with the interface the proof came in on), and the half-open link that verifies it.
+    pending: Mutex<HashMap<AddressHash, oneshot::Sender<(Link, InterfaceId)>>>,
     pending_links: Mutex<HashMap<AddressHash, link::PendingLink>>,
     /// A monotonic source of IV nonces. AES-CBC IVs must be unpredictable in production;
     /// the shell seeds this from the clock and the caller can substitute a CSPRNG.
     iv_seed: Mutex<u64>,
+    next_iface_id: AtomicU32,
 }
 
-/// A Reticulum endpoint over one TCP interface connection.
+impl Shared {
+    /// Send a packet out every interface (announces, path requests).
+    fn broadcast(&self, pkt: Packet) {
+        for i in self.interfaces.lock().unwrap().iter() {
+            let _ = i.outbound.send(pkt.clone());
+        }
+    }
+
+    /// Send a packet out one interface.
+    fn send_on(&self, iface: InterfaceId, pkt: Packet) {
+        if let Some(i) = self.interfaces.lock().unwrap().iter().find(|i| i.id == iface) {
+            let _ = i.outbound.send(pkt);
+        }
+    }
+}
+
+/// A Reticulum endpoint over any number of interfaces.
 pub struct Endpoint {
     shared: Arc<Shared>,
     accepted_rx: mpsc::UnboundedReceiver<Accepted>,
@@ -140,35 +177,9 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    /// Dial a peer's TCP interface and start the runtime.
-    pub async fn connect(addr: SocketAddr, identity: PrivateIdentity) -> io::Result<Self> {
-        Self::start(TcpStream::connect(addr).await?, identity)
-    }
-
-    /// Bind, accept one interface connection, and start the runtime.
-    pub async fn bind(addr: SocketAddr, identity: PrivateIdentity) -> io::Result<Self> {
-        let listener = TcpListener::bind(addr).await?;
-        let (stream, _) = listener.accept().await?;
-        Self::start(stream, identity)
-    }
-
-    /// Bind and report the assigned address without accepting yet.
-    pub async fn bind_addr(addr: SocketAddr) -> io::Result<(TcpListener, SocketAddr)> {
-        let listener = TcpListener::bind(addr).await?;
-        let local = listener.local_addr()?;
-        Ok((listener, local))
-    }
-
-    /// Start the runtime on an accepted/dialed stream from [`bind_addr`](Self::bind_addr).
-    pub fn from_listener_stream(stream: TcpStream, identity: PrivateIdentity) -> io::Result<Self> {
-        Self::start(stream, identity)
-    }
-
-    fn start(stream: TcpStream, identity: PrivateIdentity) -> io::Result<Self> {
-        let _ = stream.set_nodelay(true);
-        let (mut read_half, mut write_half) = stream.into_split();
-
-        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Packet>();
+    /// Create an endpoint with no interfaces yet, and start its router.
+    pub fn new(identity: PrivateIdentity) -> Self {
+        let (router_tx, mut router_rx) = mpsc::unbounded_channel::<(InterfaceId, Packet)>();
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
@@ -177,47 +188,64 @@ impl Endpoint {
             address_book: Mutex::new(AddressBook::new()),
             links: Arc::new(Mutex::new(HashMap::new())),
             registered: Mutex::new(Vec::new()),
-            outbound: outbound_tx,
+            interfaces: Mutex::new(Vec::new()),
+            router_tx,
             accepted_tx,
             announce_tx,
             pending: Mutex::new(HashMap::new()),
             pending_links: Mutex::new(HashMap::new()),
             iv_seed: Mutex::new(seed_iv()),
+            next_iface_id: AtomicU32::new(0),
         });
 
-        // Writer task: frame and send outbound packets.
-        tokio::spawn(async move {
-            while let Some(pkt) = outbound_rx.recv().await {
-                if write_half.write_all(&frame(&pkt.encode())).await.is_err() {
-                    break;
-                }
-                let _ = write_half.flush().await;
-            }
-        });
-
-        // Router task: read frames, decode, dispatch.
         let router = Arc::clone(&shared);
         tokio::spawn(async move {
-            let mut deframer = Deframer::new();
-            let mut buf = [0u8; 4096];
-            loop {
-                let n = match read_half.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => n,
-                };
-                for raw in deframer.push(&buf[..n]) {
-                    if let Ok(pkt) = Packet::decode(&raw) {
-                        route(&router, pkt);
-                    }
-                }
+            while let Some((iface, pkt)) = router_rx.recv().await {
+                route(&router, iface, pkt);
             }
         });
 
-        Ok(Self {
+        Self {
             shared,
             accepted_rx,
             announce_rx,
-        })
+        }
+    }
+
+    /// Create an endpoint and dial one TCP peer as its first interface.
+    pub async fn connect(addr: SocketAddr, identity: PrivateIdentity) -> io::Result<Self> {
+        let ep = Self::new(identity);
+        ep.attach_tcp_client(addr).await?;
+        Ok(ep)
+    }
+
+    /// Attach a connected TCP stream as an interface, and return its id.
+    pub fn attach_stream(&self, stream: TcpStream) -> InterfaceId {
+        attach(&self.shared, stream)
+    }
+
+    /// Dial a TCP peer and attach it as an interface.
+    pub async fn attach_tcp_client(&self, addr: SocketAddr) -> io::Result<InterfaceId> {
+        Ok(attach(&self.shared, TcpStream::connect(addr).await?))
+    }
+
+    /// Listen on TCP; every accepted connection becomes an interface. Returns the bound
+    /// address (pass port 0 to get an OS-assigned one).
+    pub async fn listen_tcp(&self, addr: SocketAddr) -> io::Result<SocketAddr> {
+        let listener = TcpListener::bind(addr).await?;
+        let local = listener.local_addr()?;
+        let shared = Arc::clone(&self.shared);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                attach(&shared, stream);
+            }
+        });
+        Ok(local)
+    }
+
+    /// Number of interfaces currently attached.
+    pub fn interface_count(&self) -> usize {
+        self.shared.interfaces.lock().unwrap().len()
     }
 
     /// This endpoint's public identity.
@@ -236,7 +264,7 @@ impl Endpoint {
         self.announce(&name, app_data);
     }
 
-    /// Emit an announce for a destination.
+    /// Emit an announce for a destination on every interface.
     pub fn announce(&self, name: &DestinationName, app_data: &[u8]) {
         let pkt = announce::build(
             &self.shared.identity,
@@ -245,7 +273,7 @@ impl Endpoint {
             None,
             app_data,
         );
-        let _ = self.shared.outbound.send(pkt);
+        self.shared.broadcast(pkt);
     }
 
     /// The address book, for resolving learned peers.
@@ -277,12 +305,14 @@ impl Endpoint {
             .lock()
             .unwrap()
             .insert(pending.link_id(), pending);
-        let _ = self.shared.outbound.send(request);
+        // Broadcast the request; the peer responds on whichever interface it is reachable
+        // over, and the link binds to that interface.
+        self.shared.broadcast(request);
 
-        let link = rx
+        let (link, iface) = rx
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped"))?;
-        Ok(register_stream(&self.shared, link))
+        Ok(register_stream(&self.shared, link, iface))
     }
 
     /// Wait for the next inbound link, surfaced as a stream.
@@ -308,8 +338,50 @@ impl Endpoint {
     }
 }
 
-/// Dispatch one inbound packet.
-fn route(shared: &Arc<Shared>, pkt: Packet) {
+/// Attach a connected stream as an interface: register it, and spawn its writer and reader
+/// tasks (the reader feeds the shared router, tagged with the interface id).
+fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
+    let _ = stream.set_nodelay(true);
+    let id = shared.next_iface_id.fetch_add(1, Ordering::Relaxed);
+    let (mut read_half, mut write_half) = stream.into_split();
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Packet>();
+    shared.interfaces.lock().unwrap().push(Iface { id, outbound: out_tx });
+
+    // Writer: frame and send this interface's outbound packets.
+    tokio::spawn(async move {
+        while let Some(pkt) = out_rx.recv().await {
+            if write_half.write_all(&frame(&pkt.encode())).await.is_err() {
+                break;
+            }
+            let _ = write_half.flush().await;
+        }
+    });
+
+    // Reader: deframe, decode, hand to the router tagged with this interface.
+    let router_tx = shared.router_tx.clone();
+    tokio::spawn(async move {
+        let mut deframer = Deframer::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let n = match read_half.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            for raw in deframer.push(&buf[..n]) {
+                if let Ok(pkt) = Packet::decode(&raw)
+                    && router_tx.send((id, pkt)).is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+
+    id
+}
+
+/// Dispatch one inbound packet that arrived on `iface`.
+fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
     match pkt.packet_type {
         PacketType::Announce => {
             if let Ok(a) = Announce::decode(&pkt) {
@@ -332,20 +404,20 @@ fn route(shared: &Arc<Shared>, pkt: Packet) {
                     &ephemeral,
                     LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: crate::packet::MTU as u32 },
                 ) {
-                    let _ = shared.outbound.send(proof);
-                    let stream = register_stream(shared, link);
+                    shared.send_on(iface, proof);
+                    let stream = register_stream(shared, link, iface);
                     let _ = shared.accepted_tx.send(Accepted { stream, destination: dest });
                 }
             }
         }
         PacketType::Proof => {
-            // Complete a pending outbound link.
+            // Complete a pending outbound link, binding it to the interface it came in on.
             let maybe = shared.pending_links.lock().unwrap().remove(&pkt.destination);
             if let Some(pending) = maybe
                 && let Ok(link) = pending.prove(&pkt)
                 && let Some(tx) = shared.pending.lock().unwrap().remove(&pkt.destination)
             {
-                let _ = tx.send(link);
+                let _ = tx.send((link, iface));
             }
         }
         PacketType::Data => {
@@ -365,9 +437,9 @@ fn route(shared: &Arc<Shared>, pkt: Packet) {
     }
 }
 
-/// Build a [`LinkStream`] for a live link, wiring up the inbound feed and the outbound
-/// relay, and register the link so the router can route to it.
-fn register_stream(shared: &Arc<Shared>, link: Link) -> LinkStream {
+/// Build a [`LinkStream`] for a live link on `iface`, wiring the inbound feed and the
+/// outbound relay, and register the link so the router can route to it.
+fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> LinkStream {
     let (mine, theirs) = tokio::io::duplex(DUPLEX_BUF);
     let (mut read_half, mut write_half) = tokio::io::split(theirs);
     let (inbound_tx, mut inbound_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -375,7 +447,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link) -> LinkStream {
 
     shared.links.lock().unwrap().insert(
         link_id,
-        LinkEntry { link: link.clone(), inbound: inbound_tx },
+        LinkEntry { link: link.clone(), inbound: inbound_tx, iface },
     );
 
     // Inbound: decrypted data from the router → the stream's read side.
@@ -387,9 +459,8 @@ fn register_stream(shared: &Arc<Shared>, link: Link) -> LinkStream {
         }
     });
 
-    // Outbound: the stream's writes → encrypted link data packets.
+    // Outbound: the stream's writes → encrypted link data packets, out the link's interface.
     let out_link = link;
-    let outbound = shared.outbound.clone();
     let iv_shared = Arc::clone(shared);
     tokio::spawn(async move {
         let mut buf = [0u8; WRITE_CHUNK];
@@ -398,9 +469,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link) -> LinkStream {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
                     let iv = next_iv(&iv_shared);
-                    if outbound.send(out_link.data_packet(&buf[..n], &iv)).is_err() {
-                        break;
-                    }
+                    iv_shared.send_on(iface, out_link.data_packet(&buf[..n], &iv));
                 }
             }
         }
