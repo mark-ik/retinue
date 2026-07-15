@@ -158,19 +158,34 @@ mapping, bilateral streams).
   bin, single-letter str keys). It re-packs the real captured advertisement to the
   exact bytes, key order included, which is the proof it is faithful.
 
-  **The transfer state machine is not implemented, and it is the bulk of R4.** It
-  needs: the RNS-specific derivations (resource hash, `get_map_hash`, RNS's bz2
-  variant, which differs from stdlib bz2, 720 vs 660 on the captured payload), the
-  windowed request/part/proof exchange (`WINDOW`, `SDU = 464`, `MAPHASH_LEN = 4`,
-  dynamic window sizing, retries, hashmap-exhaustion updates), both directions, and a
-  multi-megabyte round-trip gate. Each sub-format (request, part, proof) needs its own
-  capture, and the RNS resource internals resisted black-box extraction in this
-  session (the introspection harness's establishment callback did not fire reliably).
-  This is a focused multi-step build, not a tail-of-session task.
+  **Derivations solved and receiver DONE 2026-07-14, verified live.** All the
+  RNS-specific pieces were black-box extracted from a live `RNS.Resource`:
+  - resource hash = `SHA256(data || random_hash)`; map hash = `SHA256(part ||
+    random_hash)[..4]`; proof = `SHA256(data || resource_hash)`.
+  - the transferred **content is `random_hash || data`**, then optionally bz2, then
+    sealed as one link token, then split into `SDU = 464` parts. Flags: bit0 = encrypted,
+    bit1 = compressed.
+  - the windowed request is `flag(0x00) || resource_hash(32) || requested map_hash(4)*`;
+    the receiver answers with the exact parts named.
+  - the proof is a **Proof-type** packet on the link, context `RESOURCE_PRF`, payload
+    `resource_hash(32) || proof(32)`, sent unencrypted.
+
+  `src/resource.rs` implements the sender helpers and the `Incoming` receiver state
+  machine (single-segment). The **receive gate passes**
+  (`oracle/interop_resource_recv.py`): RNS sends an uncompressed resource, retinue
+  requests the parts, reassembles, decrypts, strips the random-hash prefix, verifies
+  against the resource hash, and returns the proof; **RNS concludes COMPLETE**.
+
+  Remaining for a full R4: compression (bz2, a dependency) for compressed transfers;
+  multi-segment resources (incremental hashmap via `RESOURCE_HMU`); dynamic windowing,
+  retries, and cancellation; and the sender's completion (RNS-as-receiver wrote the
+  assembled resource to a disk path its ephemeral test config could not satisfy, an
+  RNS-side harness quirk, not a retinue defect, that blocked capturing RNS's own proof).
+  The sender construction is implemented and RNS accepts it through to assembly.
 
   Done-condition unchanged: a multi-megabyte resource round-trips retinue ↔ oracle
-  intact both ways. Tooling in place: `oracle/capture_resource.py`,
-  `examples/resource_probe.rs`.
+  intact both ways. Tooling: `oracle/capture_resource*.py`, `interop_resource_recv.py`,
+  `examples/resource_{probe,recv,send_probe}.rs`.
 - **R5 — Mere adoption.** Implement Mere's `Transport` trait on retinue;
   replace the Beechat pin behind the existing feature gate; carry over the
   probe's tests (deterministic seed → destination, announce-bound `PeerID`,

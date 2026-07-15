@@ -22,10 +22,114 @@
 //! i, l, q            carried opaque (interleave / split / request), not yet interpreted
 //! ```
 
+use crate::hash::full_hash;
 use crate::{Error, Result};
 
 /// Bytes of a part's map hash in the advertisement hashmap.
 pub const MAPHASH_LEN: usize = 4;
+
+/// Length of a random hash.
+pub const RANDOM_HASH_LEN: usize = 4;
+
+/// Segment data unit: the maximum size of one part's payload. `RNS.Resource.SDU`.
+pub const SDU: usize = 464;
+
+/// Advertisement flag bit: the payload is encrypted (always set, over a link).
+pub const FLAG_ENCRYPTED: u64 = 0x01;
+/// Advertisement flag bit: the payload is bz2-compressed.
+pub const FLAG_COMPRESSED: u64 = 0x02;
+
+/// The resource hash: `SHA256(uncompressed_data || random_hash)`. It binds the resource to
+/// its content and this transfer's random hash. Verified against RNS 1.3.8.
+pub fn resource_hash(data: &[u8], random_hash: &[u8]) -> [u8; 32] {
+    let mut m = Vec::with_capacity(data.len() + random_hash.len());
+    m.extend_from_slice(data);
+    m.extend_from_slice(random_hash);
+    full_hash(&m)
+}
+
+/// A part's 4-byte map hash: `SHA256(part || random_hash)[..4]`. Verified against RNS 1.3.8.
+pub fn map_hash(part: &[u8], random_hash: &[u8]) -> [u8; MAPHASH_LEN] {
+    let mut m = Vec::with_capacity(part.len() + random_hash.len());
+    m.extend_from_slice(part);
+    m.extend_from_slice(random_hash);
+    let h = full_hash(&m);
+    let mut out = [0u8; MAPHASH_LEN];
+    out.copy_from_slice(&h[..MAPHASH_LEN]);
+    out
+}
+
+/// The content that is compressed, sealed, and split for transfer: `random_hash || data`.
+///
+/// RNS prepends the random hash to the payload before compression and encryption, so the
+/// transferred blob decrypts to this, not to the bare payload. The resource hash is still
+/// computed over `data || random_hash` (a different order); both were verified against RNS
+/// 1.3.8.
+pub fn content(data: &[u8], random_hash: &[u8]) -> Vec<u8> {
+    let mut c = Vec::with_capacity(random_hash.len() + data.len());
+    c.extend_from_slice(random_hash);
+    c.extend_from_slice(data);
+    c
+}
+
+/// Recover the payload from transferred content by stripping the `random_hash` prefix.
+pub fn data_from_content(content: &[u8]) -> Result<&[u8]> {
+    content.get(RANDOM_HASH_LEN..).ok_or(Error::Truncated)
+}
+
+/// The proof a receiver returns: `SHA256(uncompressed_data || resource_hash)`. The sender
+/// checks it against the value it precomputed. Verified against RNS 1.3.8.
+pub fn proof(data: &[u8], resource_hash: &[u8; 32]) -> [u8; 32] {
+    let mut m = Vec::with_capacity(data.len() + 32);
+    m.extend_from_slice(data);
+    m.extend_from_slice(resource_hash);
+    full_hash(&m)
+}
+
+/// Split a sealed transfer token into parts of at most [`SDU`] bytes, and compute the
+/// hashmap over them.
+pub fn split_parts(token: &[u8], random_hash: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
+    let mut parts = Vec::new();
+    let mut hashmap = Vec::new();
+    for chunk in token.chunks(SDU) {
+        hashmap.extend_from_slice(&map_hash(chunk, random_hash));
+        parts.push(chunk.to_vec());
+    }
+    (parts, hashmap)
+}
+
+/// Build an advertisement for a transfer.
+///
+/// `token` is the sealed (and possibly compressed) transfer blob; `data` is the original
+/// uncompressed payload. `compressed` sets the compression flag. This computes the hashes,
+/// splits the token into parts, and returns the advertisement plus the parts to send.
+pub fn advertise(
+    data: &[u8],
+    token: &[u8],
+    random_hash: [u8; RANDOM_HASH_LEN],
+    compressed: bool,
+) -> (Advertisement, Vec<Vec<u8>>) {
+    let hash = resource_hash(data, &random_hash);
+    let (parts, hashmap) = split_parts(token, &random_hash);
+    let mut flags = FLAG_ENCRYPTED;
+    if compressed {
+        flags |= FLAG_COMPRESSED;
+    }
+    let adv = Advertisement {
+        transfer_size: token.len() as u64,
+        data_size: data.len() as u64,
+        parts: parts.len() as u64,
+        resource_hash: hash.to_vec(),
+        original_hash: hash.to_vec(),
+        random_hash: random_hash.to_vec(),
+        flags,
+        hashmap,
+        i: 1,
+        l: 1,
+        q: None,
+    };
+    (adv, parts)
+}
 
 /// A resource transfer advertisement.
 ///
@@ -142,6 +246,121 @@ impl Advertisement {
     /// The number of parts named in the hashmap.
     pub fn hashmap_parts(&self) -> usize {
         self.hashmap.len() / MAPHASH_LEN
+    }
+}
+
+/// Receiver state for one incoming resource.
+///
+/// Drives a single-segment transfer: parse the advertisement, request the parts it names,
+/// collect them by map hash, then reassemble, decrypt, verify, and prove. Multi-segment
+/// resources (whose hashmap arrives incrementally via `RESOURCE_HMU`) are not handled yet;
+/// [`Incoming::new`] returns [`Error::BadRequest`] for an advertisement whose part count
+/// exceeds the hashmap it carries.
+pub struct Incoming {
+    hash: [u8; 32],
+    random_hash: Vec<u8>,
+    compressed: bool,
+    /// Map hashes in transfer order, as named by the advertisement hashmap.
+    order: Vec<[u8; MAPHASH_LEN]>,
+    /// Collected parts, keyed by map hash.
+    parts: std::collections::HashMap<[u8; MAPHASH_LEN], Vec<u8>>,
+}
+
+impl Incoming {
+    /// Begin receiving from an advertisement.
+    pub fn new(adv: &Advertisement) -> Result<Self> {
+        if adv.resource_hash.len() != 32 {
+            return Err(Error::BadRequest);
+        }
+        if adv.hashmap_parts() != adv.parts as usize {
+            // The full hashmap is not in this advertisement (a multi-segment resource).
+            return Err(Error::BadRequest);
+        }
+        let mut hash = [0u8; 32];
+        hash.copy_from_slice(&adv.resource_hash);
+        let order = adv
+            .hashmap
+            .chunks(MAPHASH_LEN)
+            .map(|c| {
+                let mut m = [0u8; MAPHASH_LEN];
+                m.copy_from_slice(c);
+                m
+            })
+            .collect();
+        Ok(Self {
+            hash,
+            random_hash: adv.random_hash.clone(),
+            compressed: adv.flags & FLAG_COMPRESSED != 0,
+            order,
+            parts: std::collections::HashMap::new(),
+        })
+    }
+
+    /// Whether the advertisement said the payload is bz2-compressed. A caller must be able
+    /// to decompress if this is true; retinue leaves that to the consumer.
+    pub fn is_compressed(&self) -> bool {
+        self.compressed
+    }
+
+    /// The request payload naming every part not yet held:
+    /// `flag(0x00) || resource_hash(32) || map_hash(4)*`.
+    pub fn request_payload(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(1 + 32 + self.order.len() * MAPHASH_LEN);
+        out.push(0x00); // hashmap not exhausted
+        out.extend_from_slice(&self.hash);
+        for m in &self.order {
+            if !self.parts.contains_key(m) {
+                out.extend_from_slice(m);
+            }
+        }
+        out
+    }
+
+    /// Take a received part (a raw token slice). Matched to the transfer by its map hash;
+    /// a part whose map hash is not in the advertisement is ignored.
+    pub fn accept_part(&mut self, part: &[u8]) -> bool {
+        let m = map_hash(part, &self.random_hash);
+        if self.order.contains(&m) {
+            self.parts.insert(m, part.to_vec());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Whether every advertised part has arrived.
+    pub fn is_complete(&self) -> bool {
+        self.order.iter().all(|m| self.parts.contains_key(m))
+    }
+
+    /// Reassemble the token in transfer order, decrypt it with the link, and return the
+    /// (still possibly compressed) payload. Verifies nothing on its own; call [`verify`].
+    ///
+    /// [`verify`]: Incoming::verify
+    pub fn assemble_token(&self) -> Result<Vec<u8>> {
+        if !self.is_complete() {
+            return Err(Error::Truncated);
+        }
+        let mut token = Vec::new();
+        for m in &self.order {
+            token.extend_from_slice(self.parts.get(m).expect("complete"));
+        }
+        Ok(token)
+    }
+
+    /// Check that decrypted (and decompressed) `data` matches the advertised resource hash.
+    pub fn verify(&self, data: &[u8]) -> bool {
+        resource_hash(data, &self.random_hash) == self.hash
+    }
+
+    /// The proof to return for `data`: `SHA256(data || resource_hash)`.
+    pub fn proof(&self, data: &[u8]) -> [u8; 32] {
+        proof(data, &self.hash)
+    }
+
+    /// The resource hash from the advertisement.
+    pub fn resource_hash(&self) -> [u8; 32] {
+        self.hash
     }
 }
 
@@ -391,5 +610,59 @@ mod tests {
     fn repacks_to_the_exact_captured_bytes() {
         let a = Advertisement::parse(&adv_bytes()).unwrap();
         assert_eq!(a.pack(), adv_bytes());
+    }
+
+    #[test]
+    fn hash_map_and_proof_derivations() {
+        let data = b"the quick brown fox";
+        let rh = [0x11, 0x22, 0x33, 0x44];
+        let h = resource_hash(data, &rh);
+        // map hash is a prefix of SHA256(part || rh)
+        let mh = map_hash(data, &rh);
+        assert_eq!(&crate::hash::full_hash(&[&data[..], &rh[..]].concat())[..4], &mh);
+        // proof folds the resource hash back in
+        assert_eq!(proof(data, &h), crate::hash::full_hash(&[&data[..], &h[..]].concat()));
+    }
+
+    /// The sender and receiver halves agree end to end, through a real AES token: build an
+    /// advertisement and parts, then receive them back and recover the payload. This mirrors
+    /// the live RNS gate without needing RNS.
+    #[test]
+    fn sender_and_receiver_round_trip() {
+        use crate::identity::PrivateIdentity;
+        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
+        use crate::destination::DestinationName;
+
+        // A link to seal/open with.
+        let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let (pending, req) = PendingLink::open(
+            DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
+            *dest_id.public(),
+            &[0x33; 64],
+            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        );
+        let (recv_link, proof_pkt) =
+            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
+                .unwrap();
+        let send_link = pending.prove(&proof_pkt).unwrap();
+
+        // Sender: content = rh || data, sealed, split, advertised.
+        let data: Vec<u8> = (0..1000u32).map(|i| (i * 3 + 1) as u8).collect();
+        let rh = [0xAB, 0xCD, 0xEF, 0x01];
+        let token = send_link.seal(&content(&data, &rh), &[7u8; 16]);
+        let (adv, parts) = advertise(&data, &token, rh, false);
+
+        // Receiver: parse, collect parts, recover.
+        let mut inc = Incoming::new(&adv).unwrap();
+        for p in &parts {
+            assert!(inc.accept_part(p));
+        }
+        assert!(inc.is_complete());
+        let recovered_content = recv_link.open(&inc.assemble_token().unwrap()).unwrap();
+        let recovered = data_from_content(&recovered_content).unwrap();
+        assert_eq!(recovered, &data[..]);
+        assert!(inc.verify(recovered));
+        // Proof round-trips to the value the sender precomputed.
+        assert_eq!(inc.proof(recovered), proof(&data, &inc.resource_hash()));
     }
 }

@@ -77,6 +77,21 @@ pub const CTX_REQUEST: u8 = 0x09;
 /// Packet context byte for a response over a link.
 pub const CTX_RESPONSE: u8 = 0x0a;
 
+/// Resource context bytes. See [`crate::resource`].
+pub const CTX_RESOURCE: u8 = 0x01;
+/// Resource advertisement.
+pub const CTX_RESOURCE_ADV: u8 = 0x02;
+/// Resource part request.
+pub const CTX_RESOURCE_REQ: u8 = 0x03;
+/// Resource hashmap update.
+pub const CTX_RESOURCE_HMU: u8 = 0x04;
+/// Resource proof.
+pub const CTX_RESOURCE_PRF: u8 = 0x05;
+/// Resource initiator cancel.
+pub const CTX_RESOURCE_ICL: u8 = 0x06;
+/// Resource receiver cancel.
+pub const CTX_RESOURCE_RCL: u8 = 0x07;
+
 /// Keepalive request/response sentinels, carried as the single plaintext byte of a
 /// keepalive packet.
 pub const KEEPALIVE_REQUEST: u8 = 0xff;
@@ -426,6 +441,54 @@ impl Link {
     /// Decrypt a link data packet's payload.
     pub fn decrypt(&self, packet: &Packet) -> Result<Vec<u8>> {
         self.keys.decrypt(&packet.payload)
+    }
+
+    /// Seal a whole blob with the link keys into one token (`IV || ciphertext || HMAC`).
+    ///
+    /// Resources encrypt the compressed payload as a single token, then split *that* into
+    /// parts, so the resource layer needs blob crypto rather than per-packet crypto.
+    pub fn seal(&self, plaintext: &[u8], iv: &[u8; IV_LEN]) -> Vec<u8> {
+        self.keys.encrypt(plaintext, iv)
+    }
+
+    /// Open a whole blob sealed with [`seal`](Self::seal).
+    pub fn open(&self, token: &[u8]) -> Result<Vec<u8>> {
+        self.keys.decrypt(token)
+    }
+
+    /// A link packet with an arbitrary context and an already-encrypted payload.
+    ///
+    /// Resource parts carry raw slices of a pre-sealed token, so they are not encrypted
+    /// again; the advertisement/request/proof, which are sealed, pass their token here too.
+    pub fn framed_packet(&self, context: u8, payload: Vec<u8>) -> Packet {
+        link_packet(context, self.id, payload)
+    }
+
+    /// A link packet whose plaintext is sealed with the link keys under `context`.
+    pub fn sealed_packet(&self, context: u8, plaintext: &[u8], iv: &[u8; IV_LEN]) -> Packet {
+        link_packet(context, self.id, self.keys.encrypt(plaintext, iv))
+    }
+
+    /// A resource proof packet: a `Proof`-type packet on this link, context
+    /// `RESOURCE_PRF`, payload `resource_hash(32) || proof(32)`, sent unencrypted. This is
+    /// the shape RNS 1.3.8 accepts to conclude a resource transfer (verified live).
+    pub fn resource_proof_packet(&self, resource_hash: &[u8; 32], proof: &[u8; 32]) -> Packet {
+        let mut payload = Vec::with_capacity(64);
+        payload.extend_from_slice(resource_hash);
+        payload.extend_from_slice(proof);
+        Packet {
+            ifac: false,
+            header_type: HeaderType::Type1,
+            context_flag: false,
+            propagation: Propagation::Broadcast,
+            destination_type: DestinationType::Link,
+            packet_type: PacketType::Proof,
+            hops: 0,
+            transport: None,
+            destination: self.id,
+            context: CTX_RESOURCE_PRF,
+            payload,
+        }
     }
 
     /// Classify an inbound packet addressed to this link.

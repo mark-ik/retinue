@@ -35,15 +35,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let our_dest = name.destination_hash(identity.public());
     send(&mut iface, &announce::build(&identity, name.name_hash(), &rh(), None, b"res")).await;
 
+    // Re-announce until a link arrives. A single announce races the driver's handler
+    // registration (RNS's interface connects during Reticulum() init, before the Python
+    // side registers its announce handler), which is exactly how the first introspection
+    // run silently saw nothing.
+    let mut cadence = tokio::time::interval(Duration::from_secs(2));
+    cadence.tick().await;
+
     let mut link: Option<Link> = None;
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
     while tokio::time::Instant::now() < deadline {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        let packet = match tokio::time::timeout(remaining, iface.recv()).await {
-            Err(_) => break,
-            Ok(Err(RecvError::Wire(_))) => continue,
-            Ok(Err(RecvError::Io(_))) => break,
-            Ok(Ok(p)) => p,
+        let packet = tokio::select! {
+            _ = cadence.tick(), if link.is_none() => {
+                send(&mut iface, &announce::build(&identity, name.name_hash(), &rh(), None, b"res")).await;
+                continue;
+            }
+            r = tokio::time::timeout(remaining, iface.recv()) => match r {
+                Err(_) => break,
+                Ok(Err(RecvError::Wire(_))) => continue,
+                Ok(Err(RecvError::Io(_))) => break,
+                Ok(Ok(p)) => p,
+            },
         };
         match &link {
             None if packet.packet_type == PacketType::LinkRequest && packet.destination == our_dest => {
