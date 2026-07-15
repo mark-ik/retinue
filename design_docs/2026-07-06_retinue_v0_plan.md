@@ -1,16 +1,21 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-14):** **R0–R4 done and R5's runtime done, all verified against a
-live RNS 1.3.8.** retinue holds an identity; builds and validates announces (ratcheted
-and not); frames HDLC; exchanges announces over live TCP both ways; learns peers into
-an address book and emits path requests; is a full encrypted-link peer in both roles
-(data both ways, keepalive, teardown, request/response); receives resources end to end
-(RNS concludes COMPLETE); and runs an **endpoint that exposes links as
-`AsyncRead + AsyncWrite` streams**, proven bidirectional against RNS. 34 lib tests +
-fixture/framing suites green, plus **seven live mixed-runtime interop gates** that
-pass (announce, link initiate, link respond, request/response, R2 path, resource
-receive, endpoint stream). Remaining: the mere-side `Transport` wiring (see R5), and
-R4 follow-ons (compression, multi-segment, sender completion).
+**Status (2026-07-15):** **R0–R7 done and R5 (mere adoption) landed — retinue now
+backs mere's `Transport` trait, all verified against a live RNS 1.3.8.** retinue holds
+an identity; builds and validates announces (ratcheted and not); frames HDLC; exchanges
+announces over live TCP both ways; learns peers into an address book and emits path
+requests; is a full encrypted-link peer in both roles (data both ways, keepalive,
+teardown, request/response); does resources end to end both ways incl. 2.5MB
+multi-segment (RNS concludes COMPLETE); is a full RNS-compatible transport node
+(routing verified both directions); and runs an **endpoint that exposes links as
+`AsyncRead + AsyncWrite` streams**, proven bidirectional against RNS. 63 retinue tests
++ fixture/framing suites green, plus **live mixed-runtime interop gates** (announce,
+link initiate/respond, request/response, R2 path, resource both ways, routing both
+ways, endpoint stream). **R5 mere wiring is done**: `ReticulumTransport` runs on
+`retinue::endpoint::Endpoint`; mere's reticulum-lane tests pass (bilateral round-trip
+included) and the Beechat pin is deleted. Remaining: R4 follow-ons (dynamic window
+sizing, retries/cancel) and the R8–R10 spec-parity phases (IFAC, full ratchets,
+remaining interface types).
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -236,8 +241,42 @@ scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
 
   Tooling: `oracle/capture_resource*.py`, `interop_resource_recv.py`,
   `examples/resource_{probe,recv,send_probe}.rs`.
-- **R5 — Mere adoption. RUNTIME DONE 2026-07-14; mere wiring is the remaining step.**
-  The seam mere implements its `Transport` trait against is built and RNS-verified:
+- **R5 — Mere adoption. DONE 2026-07-15. `ReticulumTransport` runs on retinue and
+  mere's reticulum-lane tests pass; the Beechat pin is gone.**
+  `mere/crates/murm/transport/src/reticulum_transport.rs` was rewritten over
+  `retinue::endpoint::Endpoint`: the builder derives the retinue identity from
+  mere's master seed (HKDF-SHA256, `keys.rs`), registers one destination per ALPN,
+  and runs three background tasks over an `Arc<Endpoint>` — an accept router
+  (dispatch `accept_on_any` inbound links to per-ALPN queues by destination), an
+  announce listener (`next_announcement` → verify the master-signed app_data
+  binding → record `PeerID → identity`), and a periodic announce sender. `connect`
+  resolves a peer's retinue identity from the learned map and calls
+  `Endpoint::open`; `accept` reads its ALPN queue; the stream is a thin newtype
+  over `LinkStream`. All 3 acceptance tests pass (stable peer-id / derived
+  identity, `AlpnNotRegistered` on unregistered accept, and a full bilateral
+  round-trip over TCP loopback — client links to server and exchanges hello/world),
+  and the whole `mere-transport` suite is green (32 tests) with the default
+  (no-feature) build unaffected. The `reticulum = "0.1"` Beechat pin is replaced by
+  `retinue = { path = "../retinue" }`.
+
+  **Dependency-resolution finding (drove two retinue-side pins).** retinue had
+  adopted the bleeding-edge RustCrypto/dalek line (ed25519/x25519-dalek 3.0.0,
+  sha2 0.11 / hkdf 0.13 / hmac 0.13). iroh 0.98 (reached transitively through
+  mere's p2panda-net) pins the *same* prerelease line but with exact `=` pins:
+  `ed25519-dalek =3.0.0-pre.6`, `sha2 =0.11.0-rc.5`. A caret `^3.0.0` (final) and an
+  exact `=3.0.0-pre.6` are both "major-3" so Cargo can neither unify them nor split
+  them into separate copies — a hard resolution failure. Fix: pin retinue's crypto
+  to the *stable* line (dalek 2.x, sha2 0.10 / hkdf 0.12 / hmac 0.12), which is
+  major/minor-*incompatible* with the prereleases and so resolves to a clean
+  separate copy — exactly how the old Beechat probe (dalek 2.x) coexisted. Crypto
+  output is byte-identical, all 63 retinue tests stay green, and the only code
+  churn was one import (`hmac::KeyInit` → the `Mac` trait's `new_from_slice`). The
+  unused `rand_core` dep was dropped. Retinue commits: endpoint `&self` (shareable),
+  dalek 2.x pin, digest-family pin.
+
+  ---
+  *Original R5 plan (for reference):* The seam mere implements its `Transport`
+  trait against is built and RNS-verified:
   `src/endpoint.rs` is a working endpoint that establishes encrypted links and
   exposes them as `AsyncRead + AsyncWrite` `LinkStream`s. The endpoint stream gate
   passes (`oracle/interop_endpoint_stream.py`): retinue accepts an inbound link as a
