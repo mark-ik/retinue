@@ -79,6 +79,26 @@ impl AsyncWrite for LinkStream {
     }
 }
 
+/// A validated announce, surfaced to a consumer that needs the app_data binding (e.g. to
+/// map an application-level peer id to a retinue destination).
+#[derive(Clone, Debug)]
+pub struct PeerAnnounce {
+    /// The destination hash announced.
+    pub destination: AddressHash,
+    /// The announcing identity.
+    pub identity: Identity,
+    /// The app data the announce carried (a host binds its own peer id here).
+    pub app_data: Vec<u8>,
+}
+
+/// An accepted inbound link and the destination it arrived on.
+pub struct Accepted {
+    /// The stream carrying the link.
+    pub stream: LinkStream,
+    /// The destination hash the link request targeted (an ALPN maps to one).
+    pub destination: AddressHash,
+}
+
 /// A live link and the channel that feeds its stream inbound bytes.
 struct LinkEntry {
     link: Link,
@@ -99,8 +119,10 @@ struct Shared {
     links: Links,
     registered: Mutex<Vec<Registered>>,
     outbound: mpsc::UnboundedSender<Packet>,
-    /// Inbound accepted streams, surfaced to `accept`.
-    accepted_tx: mpsc::UnboundedSender<LinkStream>,
+    /// Inbound accepted links (stream + destination), surfaced to `accept`.
+    accepted_tx: mpsc::UnboundedSender<Accepted>,
+    /// Validated announces, surfaced to `announcements`.
+    announce_tx: mpsc::UnboundedSender<PeerAnnounce>,
     /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake,
     /// and the half-open link that verifies the proof.
     pending: Mutex<HashMap<AddressHash, oneshot::Sender<Link>>>,
@@ -113,7 +135,8 @@ struct Shared {
 /// A Reticulum endpoint over one TCP interface connection.
 pub struct Endpoint {
     shared: Arc<Shared>,
-    accepted_rx: mpsc::UnboundedReceiver<LinkStream>,
+    accepted_rx: mpsc::UnboundedReceiver<Accepted>,
+    announce_rx: mpsc::UnboundedReceiver<PeerAnnounce>,
 }
 
 impl Endpoint {
@@ -146,7 +169,8 @@ impl Endpoint {
         let (mut read_half, mut write_half) = stream.into_split();
 
         let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel::<Packet>();
-        let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<LinkStream>();
+        let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
+        let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
         let shared = Arc::new(Shared {
             identity,
@@ -155,6 +179,7 @@ impl Endpoint {
             registered: Mutex::new(Vec::new()),
             outbound: outbound_tx,
             accepted_tx,
+            announce_tx,
             pending: Mutex::new(HashMap::new()),
             pending_links: Mutex::new(HashMap::new()),
             iv_seed: Mutex::new(seed_iv()),
@@ -191,6 +216,7 @@ impl Endpoint {
         Ok(Self {
             shared,
             accepted_rx,
+            announce_rx,
         })
     }
 
@@ -261,7 +287,21 @@ impl Endpoint {
 
     /// Wait for the next inbound link, surfaced as a stream.
     pub async fn accept(&mut self) -> io::Result<LinkStream> {
+        Ok(self.accept_on_any().await?.stream)
+    }
+
+    /// Wait for the next inbound link, with the destination it targeted (an ALPN maps to a
+    /// destination, so a host can dispatch by protocol).
+    pub async fn accept_on_any(&mut self) -> io::Result<Accepted> {
         self.accepted_rx
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
+    }
+
+    /// The next validated announce, for building a host peer-id to destination map.
+    pub async fn next_announcement(&mut self) -> io::Result<PeerAnnounce> {
+        self.announce_rx
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
@@ -274,6 +314,11 @@ fn route(shared: &Arc<Shared>, pkt: Packet) {
         PacketType::Announce => {
             if let Ok(a) = Announce::decode(&pkt) {
                 shared.address_book.lock().unwrap().ingest(&a);
+                let _ = shared.announce_tx.send(PeerAnnounce {
+                    destination: a.destination,
+                    identity: a.identity,
+                    app_data: a.app_data,
+                });
             }
         }
         PacketType::LinkRequest => {
@@ -289,7 +334,7 @@ fn route(shared: &Arc<Shared>, pkt: Packet) {
                 ) {
                     let _ = shared.outbound.send(proof);
                     let stream = register_stream(shared, link);
-                    let _ = shared.accepted_tx.send(stream);
+                    let _ = shared.accepted_tx.send(Accepted { stream, destination: dest });
                 }
             }
         }
