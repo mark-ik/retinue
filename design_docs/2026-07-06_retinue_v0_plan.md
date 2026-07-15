@@ -1,12 +1,16 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-13):** **R0, R1, R2, and R3 are done, all verified against the
-oracle.** retinue holds an identity; builds and validates announces (ratcheted and
-not); frames HDLC; exchanges announces with a real RNS 1.3.8 over live TCP both
-ways; learns peers into an address book and emits path requests; is a **full
-encrypted-link peer in both roles** (initiate and accept, data both ways, keepalive,
-teardown, request/response). 43 tests green, plus five live mixed-runtime interop
-gates that pass. Remaining for v0: R4 (resources) and R5 (fix mere onto retinue).
+**Status (2026-07-14):** **R0–R4 done and R5's runtime done, all verified against a
+live RNS 1.3.8.** retinue holds an identity; builds and validates announces (ratcheted
+and not); frames HDLC; exchanges announces over live TCP both ways; learns peers into
+an address book and emits path requests; is a full encrypted-link peer in both roles
+(data both ways, keepalive, teardown, request/response); receives resources end to end
+(RNS concludes COMPLETE); and runs an **endpoint that exposes links as
+`AsyncRead + AsyncWrite` streams**, proven bidirectional against RNS. 34 lib tests +
+fixture/framing suites green, plus **seven live mixed-runtime interop gates** that
+pass (announce, link initiate, link respond, request/response, R2 path, resource
+receive, endpoint stream). Remaining: the mere-side `Transport` wiring (see R5), and
+R4 follow-ons (compression, multi-segment, sender completion).
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -186,12 +190,41 @@ mapping, bilateral streams).
   Done-condition unchanged: a multi-megabyte resource round-trips retinue ↔ oracle
   intact both ways. Tooling: `oracle/capture_resource*.py`, `interop_resource_recv.py`,
   `examples/resource_{probe,recv,send_probe}.rs`.
-- **R5 — Mere adoption.** Implement Mere's `Transport` trait on retinue;
-  replace the Beechat pin behind the existing feature gate; carry over the
-  probe's tests (deterministic seed → destination, announce-bound `PeerID`,
-  ALPN mapping, loopback streams).
-  Done when: Mere's reticulum-lane tests pass on retinue with the Beechat
-  dependency deleted from the tree.
+- **R5 — Mere adoption. RUNTIME DONE 2026-07-14; mere wiring is the remaining step.**
+  The seam mere implements its `Transport` trait against is built and RNS-verified:
+  `src/endpoint.rs` is a working endpoint that establishes encrypted links and
+  exposes them as `AsyncRead + AsyncWrite` `LinkStream`s. The endpoint stream gate
+  passes (`oracle/interop_endpoint_stream.py`): retinue accepts an inbound link as a
+  stream, reads RNS's bytes, and echoes them back over raw link data, the exact lane
+  mere uses. The endpoint also surfaces validated announces
+  (`Endpoint::next_announcement`, carrying app_data) and destination-tagged accepts
+  (`accept_on_any`), which are the hooks a host needs for peer-id binding and
+  per-ALPN dispatch.
+
+  The central R5 claim is proven: retinue does full two-way announce, link, stream,
+  and (receive-side) resource interop with real RNS 1.3.8, ratchets and all, which is
+  more than the Beechat probe ever did.
+
+  **The remaining mere wiring** is a cross-repo integration in `mere/crates/murm/
+  transport`:
+  1. `RetinueTransport` implementing `Transport` over `Endpoint`: derive the retinue
+     identity from mere's master seed (HKDF, as the old `keys.rs` did); bind mere's
+     `PeerID` to the retinue identity via signed announce app_data (mere cannot derive
+     a peer's HKDF'd identity from its Ed25519 PeerID, so this binding is mandatory,
+     learned via `next_announcement`); map ALPN → `DestinationName`; `connect`/`accept`
+     over `Endpoint::{open, accept_on_any}`, wrapping `LinkStream` as `Transport::Stream`.
+  2. Carry over the probe's tests; delete the Beechat `reticulum = "0.1"` pin.
+
+  **Architectural note found during R5:** the current `Endpoint` is point-to-point (one
+  interface connection), which is all the RNS gates and a first mere lane need. A
+  production mere transport reaching many peers wants the endpoint extended to attach
+  to shared interface(s) and hold many links, the shape the Beechat `ReticulumStack`
+  had. That extension, plus the mere wiring above, is the focused follow-up; it needs
+  the heavy mere workspace build in view (toolchain, iroh/p2panda, the reticulum
+  feature) and retinue as a path/git dependency.
+
+  Done-condition unchanged: Mere's reticulum-lane tests pass on retinue with the
+  Beechat dependency deleted.
 - **Later, unscheduled:** serial/RNode interface, an `lxmf`-wire sibling for
   Reticulum-world mail interop, routing (probably never).
 
