@@ -410,6 +410,10 @@ pub enum Inbound {
 /// The data channel is the R0 token with the link's static key. There is no per-packet
 /// ECDH and no ephemeral prefix, because the forward secrecy already lives in the ephemeral
 /// key exchange that established the link. This is why links carry no ratchet.
+///
+/// `Clone` is cheap (an id and two 32-byte keys) and lets a stream own a sealing handle to
+/// the same link the router reads from.
+#[derive(Clone)]
 pub struct Link {
     id: AddressHash,
     keys: DerivedKeys,

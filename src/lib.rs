@@ -30,6 +30,8 @@
 pub mod address_book;
 pub mod announce;
 pub mod destination;
+#[cfg(feature = "tokio")]
+pub mod endpoint;
 pub mod hash;
 pub mod identity;
 pub mod iface;
