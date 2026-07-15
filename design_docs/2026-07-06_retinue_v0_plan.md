@@ -188,9 +188,20 @@ scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
 
   Gates: `interop_resource_recv.py` (2.5 MB / 3 segments received, HMU, RNS COMPLETE),
   `interop_send_multiseg.py` (2.5 MB / 3 segments sent, RNS COMPLETE), plus the
-  compressed and single-segment send gates. 42 tests green. Deferred as non-essential:
-  dynamic window *sizing* (retinue requests a fixed window; RNS tolerates it), retries,
-  and explicit cancellation.
+  compressed and single-segment send gates. 42 tests green.
+
+  **Deferred R4 optimizations (tracked, not needed for interop over reliable links):**
+  1. **Dynamic window sizing.** RNS grows the request window with throughput
+     (`WINDOW` 4 → `WINDOW_MAX`/`WINDOW_MAX_FAST` 75, stepped by the `RATE_FAST`/
+     `VERY_SLOW_RATE` thresholds). retinue requests all currently-known missing parts
+     at once (an unbounded window). Fine on TCP/loopback; matters for flow control on
+     slow or lossy links. To add: cap the per-request window and grow it on observed rate.
+  2. **Retries and cancellation.** retinue does not retransmit a lost part or a lost
+     HMU, and does not emit/handle `RESOURCE_ICL` (0x06, initiator cancel) or
+     `RESOURCE_RCL` (0x07, receiver cancel). RNS uses `MAX_RETRIES = 16` and
+     `PART_TIMEOUT_FACTOR` for part timeouts. Needed for reliability on lossy media
+     (LoRa/serial); invisible over TCP. To add: per-part/HMU timeout + re-request, and
+     the two cancel contexts.
 
   Historical notes (how it was built): protocol reversed 2026-07-13; the advertisement
   is a msgpack map with transfer/data sizes, part count, resource/original hashes, a
