@@ -59,6 +59,31 @@ pub fn map_hash(part: &[u8], random_hash: &[u8]) -> [u8; MAPHASH_LEN] {
     out
 }
 
+/// Compress content with bz2, as RNS does when compression helps.
+///
+/// RNS compresses the `random_hash || data` content, and only keeps the compressed form if
+/// it is smaller. Returns the bz2 bytes; the caller decides whether to use them (and sets
+/// [`FLAG_COMPRESSED`] accordingly) by comparing lengths. Available under the `compression`
+/// feature.
+#[cfg(feature = "compression")]
+pub fn compress(content: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
+    enc.write_all(content).expect("writing to a Vec cannot fail");
+    enc.finish().expect("finishing a Vec encoder cannot fail")
+}
+
+/// Decompress bz2 content. The inverse of [`compress`]; used on a received resource whose
+/// advertisement set [`FLAG_COMPRESSED`]. Returns [`Error::BadPadding`] on malformed input.
+#[cfg(feature = "compression")]
+pub fn decompress(compressed: &[u8]) -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut dec = bzip2::read::BzDecoder::new(compressed);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).map_err(|_| Error::BadPadding)?;
+    Ok(out)
+}
+
 /// The content that is compressed, sealed, and split for transfer: `random_hash || data`.
 ///
 /// RNS prepends the random hash to the payload before compression and encryption, so the
@@ -348,6 +373,36 @@ impl Incoming {
         Ok(token)
     }
 
+    /// Recover the payload from the decrypted transfer blob: decompress if the
+    /// advertisement flagged it, strip the `random_hash` prefix, and verify against the
+    /// resource hash. This is the whole receive tail in one call.
+    ///
+    /// Returns [`Error::ResourceCorrupt`] if the recovered data does not match the hash, and
+    /// [`Error::Unsupported`] if the resource is compressed but the `compression` feature is
+    /// off.
+    pub fn recover(&self, decrypted: &[u8]) -> Result<Vec<u8>> {
+        // The transferred blob is `random_hash || body`, where body is the payload,
+        // bz2-compressed if the advertisement flagged it. The random-hash prefix sits
+        // OUTSIDE the compression, so strip it first, then decompress.
+        let body = data_from_content(decrypted)?;
+        let data = if self.compressed {
+            #[cfg(feature = "compression")]
+            {
+                decompress(body)?
+            }
+            #[cfg(not(feature = "compression"))]
+            {
+                return Err(Error::Unsupported);
+            }
+        } else {
+            body.to_vec()
+        };
+        if !self.verify(&data) {
+            return Err(Error::ResourceCorrupt);
+        }
+        Ok(data)
+    }
+
     /// Check that decrypted (and decompressed) `data` matches the advertised resource hash.
     pub fn verify(&self, data: &[u8]) -> bool {
         resource_hash(data, &self.random_hash) == self.hash
@@ -610,6 +665,16 @@ mod tests {
     fn repacks_to_the_exact_captured_bytes() {
         let a = Advertisement::parse(&adv_bytes()).unwrap();
         assert_eq!(a.pack(), adv_bytes());
+    }
+
+    #[cfg(feature = "compression")]
+    #[test]
+    fn compress_round_trips() {
+        // Compressible input so bz2 actually shrinks it.
+        let content: Vec<u8> = (0..8000u32).map(|i| (i / 40) as u8).collect();
+        let squished = compress(&content);
+        assert!(squished.len() < content.len());
+        assert_eq!(decompress(&squished).unwrap(), content);
     }
 
     #[test]

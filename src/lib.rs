@@ -78,6 +78,10 @@ pub enum Error {
     LinkMismatch,
     /// A request or response could not be parsed from its msgpack.
     BadRequest,
+    /// A reassembled resource did not match its advertised hash.
+    ResourceCorrupt,
+    /// The operation needs a feature that is not enabled (e.g. `compression`).
+    Unsupported,
 }
 
 impl core::fmt::Display for Error {
@@ -95,6 +99,8 @@ impl core::fmt::Display for Error {
             Self::NotALinkRequest => "packet is not a link request",
             Self::LinkMismatch => "proof is for a different link",
             Self::BadRequest => "malformed request or response",
+            Self::ResourceCorrupt => "reassembled resource does not match its hash",
+            Self::Unsupported => "operation needs a disabled feature",
         };
         f.write_str(s)
     }

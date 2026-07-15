@@ -15,7 +15,8 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
 done = threading.Event()
 result = {}
-PAYLOAD = bytes(((i * 11 + 5) & 0xff) for i in range(900))  # 900 B uncompressed -> ~3 parts
+# Compressible payload so RNS's default bz2 actually engages: retinue must decompress it.
+PAYLOAD = bytes((i // 30) & 0xff for i in range(3000))
 
 
 def main() -> int:
@@ -51,13 +52,13 @@ def main() -> int:
                                       RNS.Destination.SINGLE, "retinue", "resource")
                 link = RNS.Link(out)
                 def est(lk):
-                    print("  RNS: link up, sending uncompressed resource")
+                    print("  RNS: link up, sending a COMPRESSED resource")
                     def cb(res):
                         result["status"] = res.status
                         print(f"  RNS: resource concluded status={res.status} "
                               f"(COMPLETE=6, FAILED=7)")
                         done.set()
-                    RNS.Resource(PAYLOAD, lk, callback=cb, auto_compress=False)
+                    RNS.Resource(PAYLOAD, lk, callback=cb, auto_compress=True)
                 link.set_link_established_callback(est)
         RNS.Transport.register_announce_handler(Linker())
         print("waiting...\n")

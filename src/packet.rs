@@ -36,8 +36,22 @@ pub const HEADER_MIN_LEN: usize = 2 + ADDRESS_HASH_LEN + 1;
 /// Largest possible header: as above, with a second address field.
 pub const HEADER_MAX_LEN: usize = 2 + ADDRESS_HASH_LEN * 2 + 1;
 
-/// Maximum size of a whole packet on the wire.
+/// Maximum size of a whole packet on the wire. `RNS.Reticulum.MTU`.
 pub const MTU: usize = 500;
+
+/// Maximum size of the data field: a plain (unencrypted) payload. `RNS.Reticulum.MDU` and
+/// `RNS.Packet.PLAIN_MDU`. A packet whose data exceeds this is dropped by RNS.
+pub const MDU: usize = 464;
+
+/// Maximum plaintext when the data field carries an encrypted token: the token framing
+/// (IV + HMAC + padding) eats into [`MDU`], so the plaintext limit is lower.
+/// `RNS.Packet.ENCRYPTED_MDU`. Link data, resource parts, and single-packet encryption must
+/// keep plaintext at or under this.
+pub const ENCRYPTED_MDU: usize = 383;
+
+// MDU is the protocol data cap and sits comfortably inside the raw MTU-minus-header room
+// (500 - 19 = 481); RNS reserves the difference.
+const _: () = assert!(MDU < MTU - HEADER_MIN_LEN);
 
 /// What kind of packet this is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -203,6 +217,22 @@ impl Packet {
         AddressHash::of(&buf)
     }
 
+    /// The encoded length of this packet on the wire.
+    pub fn encoded_len(&self) -> usize {
+        let header = match self.header_type {
+            HeaderType::Type1 => HEADER_MIN_LEN,
+            HeaderType::Type2 => HEADER_MAX_LEN,
+        };
+        header + self.payload.len()
+    }
+
+    /// Whether this packet fits the MTU. A packet that does not is dropped by RNS, so a
+    /// caller building packets by hand should check this (the link, resource, and endpoint
+    /// layers keep within it by construction).
+    pub fn within_mtu(&self) -> bool {
+        self.encoded_len() <= MTU
+    }
+
     /// Encode a packet for the wire.
     pub fn encode(&self) -> Vec<u8> {
         let mut flags = 0u8;
@@ -273,6 +303,24 @@ mod tests {
     #[test]
     fn truncated_input_is_an_error() {
         assert!(Packet::decode(&[0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn mtu_and_mdu_bounds() {
+        let mut p = Packet::decode(&{
+            let mut v = vec![0x00, 0x00];
+            v.extend_from_slice(&[0xAA; 16]);
+            v.push(0x00);
+            v
+        })
+        .unwrap();
+        p.payload = vec![0u8; MDU];
+        assert!(p.within_mtu());
+        // within_mtu is the hard wire bound: payload up to MTU - header fits, beyond fails.
+        p.payload = vec![0u8; MTU - HEADER_MIN_LEN];
+        assert!(p.within_mtu());
+        p.payload = vec![0u8; MTU - HEADER_MIN_LEN + 1];
+        assert!(!p.within_mtu());
     }
 
     /// Known answer from `oracle/capture_reqresp_response.py`: this exact request packet

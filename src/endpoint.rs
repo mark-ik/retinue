@@ -32,9 +32,9 @@ use crate::link::{self, Inbound, Link, LinkMode, LinkTrailer};
 use crate::packet::{Packet, PacketType};
 use crate::token::IV_LEN;
 
-/// Largest plaintext chunk per link data packet, leaving room for token framing under the
-/// link MTU.
-const WRITE_CHUNK: usize = 360;
+/// Largest plaintext chunk per link data packet. Kept under `ENCRYPTED_MDU` (383) so the
+/// encrypted token plus header always fits the MTU.
+const WRITE_CHUNK: usize = crate::packet::ENCRYPTED_MDU - 16;
 
 /// In-memory buffer for a stream's inbound side.
 const DUPLEX_BUF: usize = 64 * 1024;

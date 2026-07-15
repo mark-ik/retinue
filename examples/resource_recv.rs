@@ -93,15 +93,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             inc.accept_part(&packet.payload);
                             if inc.is_complete() {
                                 let token = inc.assemble_token()?;
-                                let content = l.open(&token)?; // uncompressed in this gate
-                                let data = retinue::resource::data_from_content(&content)?;
-                                let ok = inc.verify(data);
-                                println!("ASSEMBLED token={} data={} verify={}", token.len(), data.len(), ok);
-                                if ok {
-                                    let proof = inc.proof(data);
-                                    send(&mut iface, &l.resource_proof_packet(&inc.resource_hash(), &proof)).await;
-                                    println!("SENT_PROOF {}", hex::encode(proof));
-                                    println!("DATA {}", hex::encode(data));
+                                let decrypted = l.open(&token)?;
+                                // recover: decompress if flagged, strip prefix, verify.
+                                match inc.recover(&decrypted) {
+                                    Ok(data) => {
+                                        println!("ASSEMBLED token={} data={} compressed={}",
+                                            token.len(), data.len(), inc.is_compressed());
+                                        let proof = inc.proof(&data);
+                                        send(&mut iface, &l.resource_proof_packet(&inc.resource_hash(), &proof)).await;
+                                        println!("SENT_PROOF {}", hex::encode(proof));
+                                        println!("DATA {}", hex::encode(&data));
+                                    }
+                                    Err(e) => println!("RECOVER_FAILED {e}"),
                                 }
                             }
                         }

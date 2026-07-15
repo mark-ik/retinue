@@ -4,18 +4,22 @@ version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mark-ik/retinue"
-description = "An endpoint-scoped implementation of the Reticulum protocol: identity, announces, links, and resources for embedding, not routing. Early reservation; the protocol is public domain, and this is not the reference implementation (reticulum.network)."
+description = "A Rust implementation of the Reticulum protocol: identity, announces, links, resources, and routing. The protocol is public domain; this is not the reference implementation (reticulum.network)."
 keywords = ["reticulum", "mesh", "networking", "p2p", "off-grid"]
 categories = ["network-programming"]
 
 [features]
-default = ["tokio"]
+default = ["tokio", "compression"]
 # The TCP interface needs a runtime. The wire codec and HDLC framing do not, and stay
 # available with default-features = false.
 tokio = ["dep:tokio"]
+# bz2 for resources. RNS compresses resource payloads by default, so full interop needs
+# it; the pure-Rust libbz2-rs-sys backend keeps this a C-free dependency.
+compression = ["dep:bzip2"]
 
 [dependencies]
 aes = "0.9.1"
+bzip2 = { version = "0.6.1", optional = true }
 cbc = "0.2.1"
 ed25519-dalek = "3.0.0"
 hkdf = "0.13.0"
