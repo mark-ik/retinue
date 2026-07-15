@@ -166,6 +166,11 @@ struct Shared {
     /// Recently-seen announce packet hashes, for de-duplication (a ring of the last
     /// [`SEEN_ANNOUNCES`]).
     seen_announces: Mutex<(HashSet<AddressHash>, VecDeque<AddressHash>)>,
+    /// The transport node reachable on each interface (its identity hash), learned from the
+    /// `transport` field of header-type-2 announces. Packets sent out an interface with a
+    /// transport node are addressed header-type-2 `[transport][dest]` so the node forwards
+    /// them.
+    iface_transport: Mutex<HashMap<InterfaceId, AddressHash>>,
 }
 
 /// A learned route to a destination.
@@ -193,11 +198,24 @@ impl Shared {
         }
     }
 
-    /// Send a packet out one interface.
+    /// Send a packet out one interface, addressed through that interface's transport node if
+    /// it has one (header-type-2 `[transport][dest]`), so a transport node forwards it.
     fn send_on(&self, iface: InterfaceId, pkt: Packet) {
+        let addressed = self.address_for(iface, pkt);
         if let Some(i) = self.interfaces.lock().unwrap().iter().find(|i| i.id == iface) {
-            let _ = i.outbound.send(pkt);
+            let _ = i.outbound.send(addressed);
         }
+    }
+
+    /// Wrap a packet for the interface it will go out on: if that interface reaches a
+    /// transport node, make it header-type-2 with the node's id in the transport field so the
+    /// node forwards it toward `destination`. A directly-connected interface leaves it as is.
+    fn address_for(&self, iface: InterfaceId, mut pkt: Packet) -> Packet {
+        if let Some(t) = self.iface_transport.lock().unwrap().get(&iface).copied() {
+            pkt.header_type = crate::packet::HeaderType::Type2;
+            pkt.transport = Some(t);
+        }
+        pkt
     }
 
     /// Record that `dest` is reachable via `iface` at `hops`, keeping the shortest route.
@@ -258,6 +276,7 @@ impl Endpoint {
             routing: AtomicBool::new(false),
             path_table: Mutex::new(HashMap::new()),
             seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
+            iface_transport: Mutex::new(HashMap::new()),
         });
 
         let router = Arc::clone(&shared);
@@ -384,9 +403,13 @@ impl Endpoint {
             .lock()
             .unwrap()
             .insert(pending.link_id(), pending);
-        // Broadcast the request; the peer responds on whichever interface it is reachable
-        // over, and the link binds to that interface.
-        self.shared.broadcast(request);
+        // Send the request toward the destination: on the interface the path table names
+        // (addressed via its transport node if remote), or broadcast if we have no route yet
+        // (a directly-connected peer).
+        match self.shared.path_table.lock().unwrap().get(&dest).map(|e| e.iface) {
+            Some(iface) => self.shared.send_on(iface, request),
+            None => self.shared.broadcast(request),
+        }
 
         let (link, iface) = rx
             .await
@@ -466,6 +489,11 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
             if let Ok(a) = Announce::decode(&pkt) {
                 shared.address_book.lock().unwrap().ingest(&a);
                 shared.learn_path(a.destination, iface, pkt.hops);
+                // A header-type-2 announce names the transport node forwarding it; remember
+                // it as this interface's next hop so we can reach the destination through it.
+                if let Some(t) = pkt.transport {
+                    shared.iface_transport.lock().unwrap().insert(iface, t);
+                }
                 let _ = shared.announce_tx.send(PeerAnnounce {
                     destination: a.destination,
                     identity: a.identity,

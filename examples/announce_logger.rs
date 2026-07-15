@@ -61,10 +61,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             r = iface.recv() => {
                 match r {
                     Ok(pkt) if pkt.packet_type == PacketType::Announce => {
-                        // Log dest + hops. Skip our own.
+                        // Log dest + hops + header type + transport id. Skip our own.
                         if pkt.destination != our_dest {
                             let _: &Packet = &pkt;
-                            println!("RECV_ANNOUNCE dest={} hops={}", pkt.destination, pkt.hops);
+                            println!(
+                                "RECV_ANNOUNCE dest={} hops={} header={:?} transport={}",
+                                pkt.destination,
+                                pkt.hops,
+                                pkt.header_type,
+                                pkt.transport.map(|t| t.to_string()).unwrap_or_else(|| "none".into()),
+                            );
                         }
                     }
                     Ok(_) => {}
