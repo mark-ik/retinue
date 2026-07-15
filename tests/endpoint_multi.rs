@@ -83,6 +83,77 @@ async fn transport_node_forwards_announces() {
     assert_eq!(hub.route_to(b_dest).map(|(_, h)| h), Some(0));
 }
 
+/// A retinue transport-node hub forwards a link between two leaves: leaf-A, learning leaf-B
+/// only through the hub's forwarded announce, establishes a link that traverses the hub and
+/// exchanges bytes both ways. Exercises header-type-2 forwarding + link transport.
+#[tokio::test]
+async fn link_forwards_through_transport_node() {
+    let hub = Endpoint::new(PrivateIdentity::from_secret_bytes(&[9u8; 64]));
+    let addr = hub.listen_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    hub.enable_routing();
+
+    // Responder B: register + announce, echo inbound streams.
+    let b_id = PrivateIdentity::from_secret_bytes(&[3u8; 64]);
+    let mut b = Endpoint::new(b_id.clone());
+    b.attach_tcp_client(addr).await.unwrap();
+    let b_name = DestinationName::new("leaf", ["b"]);
+    let b_dest = b_name.destination_hash(b_id.public());
+    b.register(b_name.clone(), b"b");
+    tokio::spawn(async move {
+        loop {
+            let name = DestinationName::new("leaf", ["b"]);
+            b.announce(&name, b"b");
+            tokio::select! {
+                s = b.accept() => {
+                    if let Ok(mut stream) = s {
+                        tokio::spawn(async move {
+                            let mut buf = [0u8; 256];
+                            while let Ok(n) = stream.read(&mut buf).await {
+                                if n == 0 { break; }
+                                let mut r = b"echo:".to_vec();
+                                r.extend_from_slice(&buf[..n]);
+                                if stream.write_all(&r).await.is_err() { break; }
+                            }
+                        });
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(300)) => {}
+            }
+        }
+    });
+
+    // Initiator A: also registers + announces, so the hub forwards A's announce to B and B
+    // learns the hub is its transport node (needed for B's proof + replies to route back).
+    let a_id = PrivateIdentity::from_secret_bytes(&[2u8; 64]);
+    let mut a = Endpoint::new(a_id.clone());
+    a.attach_tcp_client(addr).await.unwrap();
+    let a_name = DestinationName::new("leaf", ["a"]);
+    a.register(a_name.clone(), b"a");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(6);
+    while a.resolve(b_dest).is_none() && tokio::time::Instant::now() < deadline {
+        a.announce(&a_name, b"a");
+        let _ = tokio::time::timeout(Duration::from_millis(400), a.next_announcement()).await;
+    }
+    let identity = a.resolve(b_dest).expect("A learns B through the hub");
+    // Give B a moment to receive A's forwarded announce (so B knows the hub).
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // Open a link to B through the hub and exchange a probe.
+    let mut stream = tokio::time::timeout(Duration::from_secs(8), a.open(b_dest, identity))
+        .await
+        .expect("link within timeout")
+        .expect("link opens through the hub");
+    stream.write_all(b"ping-fwd").await.unwrap();
+    stream.flush().await.unwrap();
+    let mut buf = [0u8; 256];
+    let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buf))
+        .await
+        .expect("echo within timeout")
+        .expect("read ok");
+    assert_eq!(&buf[..n], b"echo:ping-fwd", "byte stream traverses the transport node");
+}
+
 #[tokio::test]
 async fn hub_reaches_two_leaves_over_two_interfaces() {
     let hub_id = PrivateIdentity::from_secret_bytes(&[1u8; 64]);

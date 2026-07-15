@@ -171,6 +171,9 @@ struct Shared {
     /// transport node are addressed header-type-2 `[transport][dest]` so the node forwards
     /// them.
     iface_transport: Mutex<HashMap<InterfaceId, AddressHash>>,
+    /// Links being forwarded through us (this node is a transport hop): a link id maps to the
+    /// two interfaces it bridges, so a proof or link data arriving on one goes out the other.
+    link_transport: Mutex<HashMap<AddressHash, (InterfaceId, InterfaceId)>>,
 }
 
 /// A learned route to a destination.
@@ -277,6 +280,7 @@ impl Endpoint {
             path_table: Mutex::new(HashMap::new()),
             seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
             iface_transport: Mutex::new(HashMap::new()),
+            link_transport: Mutex::new(HashMap::new()),
         });
 
         let router = Arc::clone(&shared);
@@ -484,6 +488,26 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
 
 /// Dispatch one inbound packet that arrived on `iface`.
 fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
+    // Transport-node forwarding (announces are re-forwarded in their own arm instead, so
+    // they still populate our address book).
+    if pkt.packet_type != PacketType::Announce && shared.routing.load(Ordering::Relaxed) {
+        // A packet whose destination is a link we bridge goes to the opposite side, whatever
+        // its header type: the two endpoints may address it differently (one type-2 through
+        // us, one type-1 direct, e.g. a responder that never learned it is behind us).
+        let bridged = shared.link_transport.lock().unwrap().get(&pkt.destination).copied();
+        if let Some((a, b)) = bridged {
+            forward_on(shared, if iface == a { b } else { a }, pkt);
+            return;
+        }
+        // A header-type-2 packet addressed to us as the transport hop: forward toward its
+        // destination (and record a bridge if it is a link request).
+        if pkt.header_type == crate::packet::HeaderType::Type2
+            && pkt.transport == Some(shared.identity.public().hash())
+        {
+            forward(shared, iface, pkt);
+            return;
+        }
+    }
     match pkt.packet_type {
         PacketType::Announce => {
             if let Ok(a) = Announce::decode(&pkt) {
@@ -499,14 +523,17 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                     identity: a.identity,
                     app_data: a.app_data,
                 });
-                // As a transport node, propagate the announce onward: hops+1, out every
-                // other interface, once per announce (de-duplicated by packet hash).
+                // As a transport node, propagate the announce onward: hops+1, stamped with
+                // our identity as the transport node so downstream peers address replies
+                // through us, out every other interface, de-duplicated by packet hash.
                 if shared.routing.load(Ordering::Relaxed)
                     && pkt.hops < MAX_HOPS
                     && shared.announce_is_new(pkt.hash())
                 {
                     let mut fwd = pkt;
                     fwd.hops += 1;
+                    fwd.header_type = crate::packet::HeaderType::Type2;
+                    fwd.transport = Some(shared.identity.public().hash());
                     shared.broadcast_except(iface, fwd);
                 }
             }
@@ -553,6 +580,41 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
             }
         }
     }
+}
+
+/// Forward a header-type-2 packet addressed to us as a transport hop, toward its
+/// destination. `from` is the interface it arrived on.
+fn forward(shared: &Arc<Shared>, from: InterfaceId, pkt: Packet) {
+    if pkt.hops >= MAX_HOPS {
+        return;
+    }
+    let dest = pkt.destination;
+
+    // Route toward the destination by the path table.
+    let next = shared.path_table.lock().unwrap().get(&dest).map(|e| e.iface);
+    if let Some(out) = next {
+        // A link request establishes a bridge: record the link id's two interfaces so the
+        // proof and subsequent link data forward back the way they came.
+        if pkt.packet_type == PacketType::LinkRequest
+            && let Ok(link_id) = link::link_id(&pkt)
+        {
+            shared
+                .link_transport
+                .lock()
+                .unwrap()
+                .insert(link_id, (from, out));
+        }
+        forward_on(shared, out, pkt);
+    }
+}
+
+/// Re-address a forwarded packet for the interface it leaves on (stripping our transport
+/// stamp, so `send_on` re-adds the next hop's if there is one), bump hops, and send.
+fn forward_on(shared: &Arc<Shared>, out: InterfaceId, mut pkt: Packet) {
+    pkt.hops += 1;
+    pkt.header_type = crate::packet::HeaderType::Type1;
+    pkt.transport = None;
+    shared.send_on(out, pkt);
 }
 
 /// Build a [`LinkStream`] for a live link on `iface`, wiring the inbound feed and the
