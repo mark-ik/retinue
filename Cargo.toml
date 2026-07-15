@@ -21,13 +21,18 @@ compression = ["dep:bzip2"]
 aes = "0.9.1"
 bzip2 = { version = "0.6.1", optional = true }
 cbc = "0.2.1"
-ed25519-dalek = "3.0.0"
+# dalek pinned to the 2.x line, not 3.0: retinue only uses the version-stable
+# surface (from_bytes / sign / verifying_key / diffie_hellman, no keygen RNG), and
+# 2.x coexists cleanly with consumers still on the dalek 3.0.0-pre.x prereleases
+# (e.g. iroh, via mere). Major-2 vs major-3 resolve to separate copies; two
+# major-3 requirements (^3.0.0 here vs iroh's =3.0.0-pre.6) cannot. Crypto output
+# is identical, so the RNS wire fixtures are unaffected.
+ed25519-dalek = "2"
 hkdf = "0.13.0"
 hmac = "0.13.0"
-rand_core = "0.10.1"
 sha2 = "0.11.0"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "time", "macros"], optional = true }
-x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]
 hex = "0.4.3"
