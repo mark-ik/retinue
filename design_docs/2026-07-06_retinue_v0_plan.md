@@ -277,19 +277,32 @@ scope that rationale no longer fits. Flagged for Mark; not renamed unilaterally.
 These follow R0–R5 and bring retinue to RNS protocol parity. Sequencing is a
 proposal, not fixed.
 
-- **R6 — multi-interface endpoint.** The shared prerequisite for both routing and
-  mere's multi-peer transport: a node that attaches to several interfaces and holds
-  many links, routing packets between them. The current `Endpoint` is point-to-point;
-  this generalises it. Everything below depends on it.
-- **R7 — transport-node routing.** Path table (destination → next-hop interface +
-  transport id + hops + expiry, learned from announces); announce propagation
-  (re-emit with hops+1, dedup via a packet-hash seen-set, hop limit, the ~2% bandwidth
-  rule); packet forwarding (header-type-2 rewrite toward the next hop); link transport
-  (record link-request hashes with their inbound interface so proofs and link data
-  forward along the reverse path); path-request responses. The primitives already
-  exist: header-type-2 codec, `Packet::hash`, announce parsing, the address book.
-  Done when: retinue routes between two RNS peers two hops apart (the original R2
-  done-condition, now actually reachable), verified live.
+- **R6 — multi-interface endpoint. DONE 2026-07-15.** `Endpoint::new` +
+  `attach_tcp_client` / `listen_tcp` (accept loop, one interface per connection). Every
+  interface's reader feeds one router channel tagged with the interface; a per-interface
+  writer drains its own outbound. Announces broadcast to all interfaces; a link binds to
+  the interface it came in on. Integration test: a hub with two interfaces reaches two
+  leaves independently (echoes uncrossed).
+- **R7 — transport-node routing. DONE 2026-07-15, RNS-interop both ways.** retinue is a
+  fully functional, RNS-compatible transport node.
+  - **Leaf side** (retinue routes *through* a transport node): a header-type-2 announce
+    teaches an interface's next-hop transport node (its identity hash, in the transport
+    field). Packets out such an interface are addressed header-type-2 `[transport][dest]`.
+    Verified live: a retinue leaf reaches a peer two hops away through a real RNS
+    transport node (`oracle/capture_link_forward.py`) — the original R2 done-condition.
+  - **Node side** (retinue forwards): announce propagation (stamp header-type-2 with our
+    id, hops+1, dedup by packet hash, hop limit); a packet whose destination is a link we
+    bridge forwards to the opposite interface whatever its header type (the key subtlety:
+    a responder that never learned it is behind us replies header-type-1, and we must
+    still forward it back); a header-type-2 packet addressed to us forwards toward its
+    destination by the path table, recording a link-transport bridge for link requests.
+    Verified live: a real RNS node routes through a retinue transport node
+    (`oracle/interop_transport_node.py`) — link + echo.
+  - Primitives that made it cheap: header-type-2 codec, `Packet::hash`, announce parsing,
+    the address book (all pre-existing).
+  - Deferred (non-essential): the ~2% announce-bandwidth cap and path-request *responses*
+    (retinue emits path requests; answering them is a transport-node nicety, not needed
+    for the above); path/link-transport table expiry.
 - **R8 — IFAC.** Interface access codes: derive the shared Ed25519 signing identity
   from a passphrase/network name, sign every outbound packet, verify + drop on inbound.
   1–64-byte codes. retinue already decodes the IFAC flag.
