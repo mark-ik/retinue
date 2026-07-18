@@ -352,6 +352,107 @@ proposal, not fixed.
   same interface seam as TCP.
 - **Still out:** LXMF and application/message layers (separate sibling).
 
+## On-air readiness — the pre-R10 gate (added 2026-07-17)
+
+Prompted by an external roadmap review and verified against the tree. Five items
+are filed across R4, R7, and the open questions as independent "pick up whenever"
+deferrals. **They are not independent.** Each was deferrable for one reason — TCP
+hid it — and each comes due the moment a lossy, shared-airtime interface (LoRa via
+RNode, serial) lands. They are **one milestone, and R10 is its trigger, not its
+peer.** None of it is needed while TCP is the only interface; all of it is needed
+before the first packet goes on air.
+
+The five, and why TCP hid each:
+
+1. **Link reliability** (was an open question, "decide at R3" — decided by default
+   when R5 shipped `LinkStream` into mere's `Transport`). RNS link data packets are
+   unsequenced best-effort; retinue's `LinkStream` sends raw `data_packet`s with no
+   sequence number or retransmit, and there is **no `Channel`/`Buffer` layer in the
+   tree** (verified). On TCP the transport delivers in order, so it is invisible. On
+   LoRa, `poll_write` returns `Ok(n)` on a link that silently drops parts — a `std`
+   `AsyncWrite` returning `Ok` for bytes that never arrive is a trait lying to its
+   caller, and **mere is already that caller.** Correct today only because the sole
+   interface is reliable; a latent correctness bug, not a live one.
+   - **Resolution: implement RNS `Channel` + `Buffer`, not a bespoke shim.** Raw
+     link data is best-effort *by spec* — retinue is faithful there. RNS's own
+     reliable stream is a separate layer: `Channel` (sequenced, windowed, retried)
+     with `Buffer` for stream I/O on top. Back `LinkStream` with `Buffer`/`Channel`
+     and mere's stream becomes reliable over any medium **transparently, no API
+     change**. This supersedes the old "sequence-it vs reliable-interfaces-only"
+     open question — RNS already answers it.
+2. **R4 dynamic window sizing.** Flow control on slow/lossy links; a fixed window
+   wastes airtime or overruns a slow peer.
+3. **R4 retries + cancellation.** Reliability on lossy media; invisible over TCP.
+   Folds into the Channel/Buffer work — that is where retries live.
+4. **R7 announce bandwidth cap (~2%).** On fixed TCP topology, forwarding announces
+   without a budget costs nothing anyone notices. On shared airtime, airtime is
+   *the* scarce resource: an uncapped transport node degrades the channel for
+   everyone on it, and RNS's own machinery penalizes exactly that.
+5. **R7 path / link-transport table expiry.** TCP topology does not move, so a stale
+   next-hop is harmless. Radio moves; a stale path table blackholes traffic toward a
+   peer that has gone. Mandatory the moment the topology can change under you.
+
+**One correction to the review, and it cuts the other way:** it called the R10
+interface "the cheap part — KISS mostly written in `iface::hdlc`." Not quite.
+retinue has **HDLC** (0x7E flag byte-stuffing); **KISS** is different bytes (FEND
+0xC0 / FESC 0xDB), plus command framing, plus the RNode-specific opcodes
+(rnodeconf). The pattern transfers; the code mostly does not. The trigger is a bit
+more than a rename of the deframer — which only sharpens the point that on-air is a
+real milestone, not a flag-day.
+
+**Sequencing:** resolve link reliability (Channel/Buffer) **before** R10 — it is a
+correctness contract mere already leans on, cheaper to settle now than after a lossy
+interface exposes it. The four airtime/flow items (2–5) may land with R10 but must
+all be present before any on-air *deployment*; none is optional on a shared channel.
+
+**Exit criterion:** on R10 completion (retinue genuinely on-air capable), **update
+the README** — it currently describes a TCP-only endpoint and must reflect
+LoRa/RNode/serial and the on-air posture.
+
+### Sharpened by the review's reply (2026-07-17)
+
+Two corrections to the framing above, both right:
+
+- **Channel/Buffer does not *leave* the on-air bucket — it joins it.** Naming the
+  right artifact (RNS `Channel`/`Buffer`, documented in the manual; sources sit in
+  the oracle venv, unread) does not move the work. A retry/window/timeout layer's
+  entire value is in its loss paths, and the oracle is Python RNS over **TCP
+  loopback** — it never drops, reorders, or delays. Implement Channel against it and
+  every retry branch is dead code that passes because it never runs: a green gate
+  proving Channel works on the one medium where Channel is unnecessary. The
+  "dissolves it" framing above was wrong; it is a healthier *name* for the work, not
+  less work.
+- **So the first build is the lossy oracle, and it needs no hardware.** A
+  deterministic drop / reorder / delay shim on the interface seam, **seeded so
+  failures reproduce**. That is the prerequisite for building Channel, retries,
+  cancellation, dynamic window sizing, and part timeouts *correctly*. Most of the
+  on-air milestone is desk work, blocked today only by the absence of a medium that
+  misbehaves — a few hundred lines, not a radio. **This is the next build.**
+
+**The one piece that genuinely needs hardware.** The reference discipline names RNS
+Python (barred), Beechat (MIT, free), FreeTAK (EPL, technique-only) — and says
+nothing about **RNode_Firmware**, which is **GPLv3** and the *only* normative
+definition of the RNode serial opcodes. The manual documents RNodeInterface's config
+*options* (frequency, bandwidth, spreading factor) but not the opcodes that set them
+(they hang off `SetHardware 0x06`). No public-domain source exists. So R10's RNode
+half is the first phase where capture needs a **physical board on USB**, black-boxed
+the way `rnsd` has been — the vocabulary can't be read from anything the discipline
+allows. That is a procurement lead time and a policy note, not a coding task, and it
+is the *only* part of the milestone gated on hardware.
+
+**KISS, precisely** (correcting the correction): not just different constants. HDLC
+unescapes by XOR (`0x7D`, then `byte ^ 0x20`); KISS unescapes by transposition
+(`0xDB 0xDC → 0xC0`, `0xDB 0xDD → 0xDB`), adds a command byte after `FEND` (high
+nibble port, low nibble command), and hangs RNode's opcodes off `SetHardware`. The
+deframer's *shape* survives; the operation doesn't. Reusable part: "you've written a
+deframer before."
+
+*Credit: this section is a three-round exchange with an external reviewer — the
+five-into-one decomposition and the Channel-joins-the-bucket / lossy-oracle
+sharpening are theirs; the Channel/Buffer naming and the KISS/HDLC mechanics are
+retinue's. The lossy oracle is the agreed next build; the RNode board is the agreed
+procurement.*
+
 ## Decisions (2026-07-13)
 
 **Version pin: RNS 1.3.8, and the 1.x churn does not threaten us.** Upstream is
