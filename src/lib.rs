@@ -43,6 +43,7 @@ pub mod iface;
 pub mod link;
 pub mod packet;
 pub mod path;
+pub mod reliable;
 pub mod request;
 pub mod resource;
 pub mod token;
@@ -53,6 +54,7 @@ pub use destination::DestinationName;
 pub use hash::{AddressHash, NameHash};
 pub use identity::{Identity, PrivateIdentity};
 pub use packet::Packet;
+pub use reliable::ReliableChannel;
 
 /// Anything that can go wrong decoding or validating.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

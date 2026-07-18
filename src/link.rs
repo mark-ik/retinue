@@ -62,6 +62,10 @@ pub const LINK_PROOF_LEN: usize = SIGNATURE_LEN + KEY_LEN + TRAILER_LEN;
 /// Packet context byte for a link request proof.
 pub const CTX_LRPROOF: u8 = 0xff;
 
+/// Packet context byte for a `Channel` message (RNS `Packet.CHANNEL`). A reliable stream's
+/// envelopes ride link data packets under this context; see [`crate::reliable`].
+pub const CTX_CHANNEL: u8 = 0x0e;
+
 /// Packet context byte for the link RTT packet.
 pub const CTX_LRRTT: u8 = 0xfe;
 
