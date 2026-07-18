@@ -1175,7 +1175,42 @@ output; the constants are public class attributes; the packet context is `RNS.Pa
 tested against the loss oracle, but its own wire. To become RNS-Channel-compatible: (1) swap the
 envelope to the layout above under context 14; (2) move seq to wrapping u16; (3) replace explicit
 acks with link-proof acks (pending O-18's ack half); (4) adopt the dynamic window. The reliability tests
-carry over unchanged — only the codec + ack-source swap.
+carry over unchanged — only the codec + ack-source swap. **All four done 2026-07-17/18**: the
+envelope, wrapping u16 sequence, proof-as-ack (`on_proof`), and the dynamic window all landed in
+`src/channel.rs`, gold-tested against the fixtures.
+
+### 3.10 Buffer — the stream frame over a Channel (captured 2026-07-18)
+
+`Buffer` is RNS's byte stream: it chunks bytes into `StreamDataMessage`s carried as Channel
+messages, keyed by a `stream_id` so one Channel multiplexes several streams. Captured black-box
+via `oracle/capture_buffer.py`; fixture `tests/fixtures/buffer_wire.json`. `StreamDataMessage.pack()`
+is pure over `(stream_id, data, eof, compressed)`, so the frame is read directly from its output.
+
+- **Message type:** `STREAM = 0xff00` (the Channel envelope's `msgtype` for stream chunks).
+- **Frame layout** (the envelope *payload*, big-endian):
+
+  ```
+  [ u16 header ][ data ]        header = eof<<15 | compressed<<14 | stream_id
+  ```
+
+  `stream_id` is the low **14 bits** (`STREAM_ID_MAX = 0x3fff`); the top two bits are the flags.
+  The data length is *not* in the frame — it is the enclosing envelope's `length` minus 2. Verified
+  vectors (RNS's own `pack()`): `sid=0,"hi"` → `0000 6869`; `sid=16383,"hi"` → `3fff 6869`;
+  `sid=7,eof,"AB"` → `8007 4142`; `sid=7,compressed,"AB"` → `4007 4142`.
+- **Sizes:** `MAX_DATA_LEN = 423` data bytes per frame, `OVERHEAD = 8` (2 stream header + 6 envelope
+  header) — so a full stream packet is 431 bytes of link MDU.
+- **Compression:** `pack()` stores `data` **verbatim** even with `compressed=1` — the flag marks a
+  bz2 transform applied to `data` *before* framing, not a layout change. So the frame codec is
+  compression-agnostic; only a sender that compresses and a receiver that inflates need bz2.
+- **EOF:** a frame with the eof bit set ends that `stream_id`'s stream. It may carry final data or
+  be empty.
+
+**Implication for retinue — done 2026-07-18.** `channel::StreamFrame` encodes this layout; `Buffer`
+now frames every write as a `StreamFrame` under `0xff00`, filters reads by `recv_stream_id`, and
+signals `finish()`/`recv_finished()` via the eof bit — gold-tested against the fixture. retinue never
+sets `compressed` on send; a compressed frame received from RNS is surfaced
+(`had_unsupported_frame`) rather than spliced in as garbage, pending a bz2 receive pass (the one
+remaining interop gap, narrow because bz2 rarely shrinks a sub-423-byte chunk).
 
 ---
 
@@ -1204,7 +1239,7 @@ Ranked by blast radius: how badly a wrong guess hurts, and how silently.
 | **O-15** | **Path response.** Is an announce delivered as a path response distinguished by context byte 0x0B? Issue a path request (destination `rnstransport.path.request`, 51-byte packet = 19 + 32) and dump the context byte of what comes back. Also confirms the real Plain destination hash (expected `6b9f66014d9853faab220fba47d02761`) and the type-2 address order in one experiment. | Cannot distinguish solicited from spontaneous announces. Cheap; settles three questions at once. |
 | **O-16** | **Link close (0xFC) and identify (0xFB) payloads.** Both are dead constants in the crate; `Link::close()` sends nothing. Encrypted or plaintext? What plaintext? | Blocks R3's teardown and R4's `ALLOW_LIST`. |
 | **O-17** | **Resource wire format, in full.** Advertisement, part, part request, hashmap update, proof, cancel: serialization format, field order, integer widths, flags, hashmap encoding, windowing model, segmentation ceiling, compression algorithm. | **Blocks all of R4.** Nothing is known below the context codes. |
-| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** ~~Sequence-number width, message-type tag, ack/retry scheme~~, `stream_id` encoding, EOF marker. **MOSTLY ANSWERED 2026-07-17** (§3.9; fixtures `channel_wire.json`, `channel_link.json`): envelope = `[msgtype u16][seq u16][len u16][payload]` under context 14; seq windowed 16-bit; dynamic window constants captured; **ack/retry = the link packet proof** — an unproven sequence retransmits (confirmed: 5 resends of seq 0 with no ack). **Remaining:** Buffer's `stream_id` encoding and EOF marker (a `Buffer.create_bidirectional_buffer` capture). | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
+| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** ~~Sequence-number width, message-type tag, ack/retry scheme, `stream_id` encoding, EOF marker~~. **ANSWERED — Channel 2026-07-17 (§3.9), Buffer 2026-07-18 (§3.10).** Channel: envelope `[msgtype u16][seq u16][len u16][payload]` under context 14, windowed 16-bit seq, dynamic window, **ack/retry = the link packet proof** (5 silent resends of seq 0). Buffer: stream frame `[eof<<15 \| compressed<<14 \| stream_id:14][data]` under msgtype `0xff00`, `MAX_DATA_LEN=423`, eof bit ends a stream. All gold-tested against fixtures `channel_wire.json` / `channel_link.json` / `buffer_wire.json` and implemented in `src/channel.rs`. Only open interop edge: receiving RNS's *bz2-compressed* frames (narrow — bz2 rarely shrinks a sub-423-byte chunk). | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
 | **O-19** | **Multi-aspect edge cases.** Zero aspects (is the trailing `.` omitted?), an empty-string aspect, a non-ASCII aspect. Beechat takes aspects as a single pre-dotted string and never exercises the join. | Wrong destination hashes for a class of names. Cheap. |
 | **O-20** | **Random hash structure.** Are the 10 bytes pure randomness, or is part a timestamp? Capture several announces from one destination seconds apart and look for monotonic structure. | Signature interop is unaffected (the field is opaque to a verifier). Only affects de-dup and freshness. Low. |
 | **O-21** | **MDU enforcement on receive.** Does RNS drop an over-MDU packet on ingress, or only refuse to emit one? Is the ceiling 464 or 465? | Determines how strict our decoder should be. Low. |

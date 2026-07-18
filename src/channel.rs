@@ -66,11 +66,18 @@ const FAST_RATE_THRESHOLD: u32 = 10;
 /// real clock; a counter in tests).
 pub const DEFAULT_RETX_TIMEOUT: u64 = 4;
 
-/// A retinue message-type tag for opaque stream bytes, until RNS's `Buffer` stream
-/// msgtype + EOF framing are captured (the remaining half of O-18). `Buffer` uses it;
-/// it is not yet RNS-`Buffer`-wire-compatible, though the `Channel` envelope carrying
-/// it is.
-pub const STREAM_MSGTYPE: u16 = 0xF900;
+/// RNS `Buffer`'s stream-frame message type: a stream chunk rides a [`Channel`]
+/// envelope under this msgtype (RNS `StreamDataMessage.MSGTYPE`). Captured black-box
+/// (`buffer_wire.json`).
+pub const STREAM_MSGTYPE: u16 = 0xFF00;
+
+/// The largest stream id. The id is the low 14 bits of the [`StreamFrame`] header (RNS
+/// `StreamDataMessage.STREAM_ID_MAX`); the top two bits are the eof / compressed flags.
+pub const STREAM_ID_MAX: u16 = 0x3FFF;
+
+/// The most stream data bytes in one [`StreamFrame`] (RNS `StreamDataMessage.MAX_DATA_LEN`):
+/// the link MDU less the 6-byte envelope header and the 2-byte stream header (`OVERHEAD` 8).
+pub const MAX_DATA_LEN: usize = 423;
 
 /// One channel message on the wire: `[msgtype u16][sequence u16][length u16][payload]`,
 /// big-endian. This is RNS 1.3.8's `Channel.Envelope` layout exactly.
@@ -307,23 +314,88 @@ impl Channel {
     }
 }
 
-/// Default per-message chunk: sized to sit inside a link data packet (`MDU` 464, less
-/// channel framing and link encryption overhead) with margin.
-pub const DEFAULT_CHUNK: usize = 384;
-
-/// A byte stream over a reliable [`Channel`]: [`write`](Self::write) chunks bytes into
-/// channel messages, [`read`](Self::read) concatenates delivered messages in order.
-/// The stream-shaped, reliable face of `Channel` — the piece an `AsyncRead + AsyncWrite`
-/// link binds to once a driver pumps [`poll_transmit`](Self::poll_transmit) /
-/// [`handle`](Self::handle) / [`on_proof`](Self::on_proof) against the wire. Sans-io
-/// like `Channel`; it adds only the byte<->message boundary.
+/// One RNS `Buffer` stream frame: the payload of the [`Channel`] envelope carrying a
+/// stream chunk. Layout `[u16 BE header][data]`, header = `eof<<15 | compressed<<14 |
+/// stream_id` (`stream_id` in the low 14 bits, [`STREAM_ID_MAX`]). The data length is
+/// implied by the enclosing envelope's length field, so the frame carries none. This is
+/// RNS 1.3.8's `StreamDataMessage.pack()` layout exactly (captured in `buffer_wire.json`).
 ///
-/// Uses [`STREAM_MSGTYPE`]; RNS's own `Buffer` stream msgtype + EOF framing are the
-/// remaining half of O-18 and pin later.
+/// `compressed` marks a bz2 transform applied to `data` *before* framing, not a layout
+/// change — `pack()` stores `data` verbatim either way. retinue never sets it on send;
+/// decoding a compressed frame from RNS needs a bz2 pass that is not yet wired.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StreamFrame {
+    /// Stream id (14-bit): which multiplexed stream this chunk belongs to.
+    pub stream_id: u16,
+    /// End-of-stream marker: the last frame of this stream.
+    pub eof: bool,
+    /// Whether `data` is bz2-compressed (see the type docs).
+    pub compressed: bool,
+    /// The stream bytes (uncompressed unless `compressed`).
+    pub data: Vec<u8>,
+}
+
+impl StreamFrame {
+    const EOF_BIT: u16 = 0x8000;
+    const COMPRESSED_BIT: u16 = 0x4000;
+
+    /// Encode to the RNS stream-frame layout.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut header = self.stream_id & STREAM_ID_MAX;
+        if self.eof {
+            header |= Self::EOF_BIT;
+        }
+        if self.compressed {
+            header |= Self::COMPRESSED_BIT;
+        }
+        let mut out = Vec::with_capacity(2 + self.data.len());
+        out.extend_from_slice(&header.to_be_bytes());
+        out.extend_from_slice(&self.data);
+        out
+    }
+
+    /// Decode from the RNS stream-frame layout, or `None` if shorter than the header.
+    pub fn decode(bytes: &[u8]) -> Option<StreamFrame> {
+        let header = u16::from_be_bytes(bytes.get(0..2)?.try_into().ok()?);
+        Some(StreamFrame {
+            stream_id: header & STREAM_ID_MAX,
+            eof: header & Self::EOF_BIT != 0,
+            compressed: header & Self::COMPRESSED_BIT != 0,
+            data: bytes.get(2..)?.to_vec(),
+        })
+    }
+}
+
+/// Default per-frame chunk: RNS's own `MAX_DATA_LEN` — the most stream bytes that fit in
+/// one link data packet after the envelope and stream headers.
+pub const DEFAULT_CHUNK: usize = MAX_DATA_LEN;
+
+/// A byte stream over a reliable [`Channel`], RNS `Buffer`-wire-compatible. Each write
+/// chunk is a [`StreamFrame`] (stream id + eof + data) carried in a [`Channel`] envelope
+/// under [`STREAM_MSGTYPE`]; [`read`](Self::read) concatenates delivered frames' data in
+/// order. The stream-shaped, reliable face of `Channel` — the piece an
+/// `AsyncRead + AsyncWrite` link binds to once a driver pumps
+/// [`poll_transmit`](Self::poll_transmit) / [`handle`](Self::handle) /
+/// [`on_proof`](Self::on_proof) against the wire. Sans-io like `Channel`.
+///
+/// The stream is multiplexable: a buffer sends on `send_stream_id` and reads only frames
+/// tagged with `recv_stream_id`, so one `Channel` carries several streams (RNS's
+/// bidirectional buffer is two ids over one channel). [`finish`](Self::finish) marks the
+/// send stream done with an eof frame; [`recv_finished`](Self::recv_finished) reports the
+/// peer's eof.
+///
+/// Compression is not wired: retinue never sets the compressed flag on send, and a
+/// compressed frame received from RNS is left undecoded rather than appended as garbage —
+/// [`had_unsupported_frame`](Self::had_unsupported_frame) surfaces that it happened. Full
+/// interop-receive of RNS-compressed streams needs a bz2 pass, deferred.
 pub struct Buffer {
     channel: Channel,
     max_chunk: usize,
+    send_stream_id: u16,
+    recv_stream_id: u16,
     read_buf: VecDeque<u8>,
+    recv_eof: bool,
+    saw_unsupported: bool,
 }
 
 impl Default for Buffer {
@@ -333,21 +405,46 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    /// A buffer with the default channel and chunk size.
+    /// A buffer with the default channel and chunk size, stream id 0 both ways.
     pub fn new() -> Self {
         Self::with_channel(Channel::new(STREAM_MSGTYPE), DEFAULT_CHUNK)
     }
 
-    /// A buffer over an explicit channel and chunk size.
+    /// A buffer over an explicit channel and chunk size, stream id 0 both ways.
     pub fn with_channel(channel: Channel, max_chunk: usize) -> Self {
-        Self { channel, max_chunk: max_chunk.max(1), read_buf: VecDeque::new() }
+        Self::with_streams(channel, max_chunk, 0, 0)
     }
 
-    /// Queue bytes for reliable, in-order delivery, chunked into channel messages.
+    /// A buffer with explicit send / receive stream ids (each clamped to
+    /// [`STREAM_ID_MAX`]) — one channel multiplexing distinct streams.
+    pub fn with_streams(channel: Channel, max_chunk: usize, send_stream_id: u16, recv_stream_id: u16) -> Self {
+        Self {
+            channel,
+            max_chunk: max_chunk.clamp(1, MAX_DATA_LEN),
+            send_stream_id: send_stream_id & STREAM_ID_MAX,
+            recv_stream_id: recv_stream_id & STREAM_ID_MAX,
+            read_buf: VecDeque::new(),
+            recv_eof: false,
+            saw_unsupported: false,
+        }
+    }
+
+    /// Queue bytes for reliable, in-order delivery, chunked into [`StreamFrame`]s.
     pub fn write(&mut self, bytes: &[u8]) {
         for chunk in bytes.chunks(self.max_chunk) {
-            self.channel.send(chunk.to_vec());
+            self.send_frame(chunk.to_vec(), false);
         }
+    }
+
+    /// Mark the send stream finished: queue an empty eof frame. RNS also accepts eof
+    /// riding a final data frame; a standalone eof is the simpler equivalent.
+    pub fn finish(&mut self) {
+        self.send_frame(Vec::new(), true);
+    }
+
+    fn send_frame(&mut self, data: Vec<u8>, eof: bool) {
+        let frame = StreamFrame { stream_id: self.send_stream_id, eof, compressed: false, data };
+        self.channel.send(frame.encode());
     }
 
     /// Copy up to `out.len()` delivered bytes into `out`, returning the count read.
@@ -368,8 +465,35 @@ impl Buffer {
 
     fn fill(&mut self) {
         while let Some(msg) = self.channel.recv() {
-            self.read_buf.extend(msg);
+            let Some(frame) = StreamFrame::decode(&msg) else {
+                continue; // malformed frame; the channel already ordered/deduped it
+            };
+            if frame.stream_id != self.recv_stream_id {
+                continue; // a different multiplexed stream on the same channel
+            }
+            if frame.compressed {
+                // Undecodable without a bz2 pass (see the type docs). Don't append the
+                // compressed bytes as if they were data; flag it instead of corrupting.
+                self.saw_unsupported = true;
+            } else {
+                self.read_buf.extend(frame.data);
+            }
+            if frame.eof {
+                self.recv_eof = true;
+            }
         }
+    }
+
+    /// Whether the peer has signalled end-of-stream (an eof frame on `recv_stream_id`).
+    pub fn recv_finished(&mut self) -> bool {
+        self.fill();
+        self.recv_eof
+    }
+
+    /// Whether a frame arrived that this buffer could not decode (today: a compressed
+    /// frame from RNS). Its bytes were dropped rather than corrupting the stream.
+    pub fn had_unsupported_frame(&self) -> bool {
+        self.saw_unsupported
     }
 
     /// Envelopes to put on the wire now — see [`Channel::poll_transmit`].
@@ -400,7 +524,10 @@ impl Buffer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Buffer, Channel, Envelope, DEFAULT_RETX_TIMEOUT, WINDOW_INITIAL};
+    use super::{
+        Buffer, Channel, Envelope, StreamFrame, DEFAULT_RETX_TIMEOUT, MAX_DATA_LEN, STREAM_ID_MAX,
+        STREAM_MSGTYPE, WINDOW_INITIAL,
+    };
     use crate::lossy::LossModel;
 
     #[test]
@@ -619,5 +746,89 @@ mod tests {
             "window shrank on retransmit ({grown} -> {})",
             c.window()
         );
+    }
+
+    #[test]
+    fn stream_frame_matches_rns_capture() {
+        // Gold test: retinue's StreamFrame encoding equals RNS 1.3.8's own
+        // StreamDataMessage.pack() for every captured vector, and our constants match.
+        let fixture = include_str!("../tests/fixtures/buffer_wire.json");
+        let doc: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let c = &doc["constants"];
+        assert_eq!(c["MSGTYPE"].as_u64().unwrap() as u16, STREAM_MSGTYPE);
+        assert_eq!(c["STREAM_ID_MAX"].as_u64().unwrap() as u16, STREAM_ID_MAX);
+        assert_eq!(c["MAX_DATA_LEN"].as_u64().unwrap() as usize, MAX_DATA_LEN);
+        for v in doc["frame_vectors"].as_array().unwrap() {
+            let frame = StreamFrame {
+                stream_id: v["stream_id"].as_u64().unwrap() as u16,
+                eof: v["eof"].as_bool().unwrap(),
+                compressed: v["compressed"].as_bool().unwrap(),
+                data: hex_bytes(v["data_hex"].as_str().unwrap()),
+            };
+            let expected = v["packed_hex"].as_str().unwrap();
+            assert_eq!(hex_str(&frame.encode()), expected, "encode must equal RNS pack()");
+            assert_eq!(StreamFrame::decode(&frame.encode()), Some(frame), "round-trip");
+        }
+    }
+
+    #[test]
+    fn buffer_demuxes_by_stream_id_and_signals_eof() {
+        // One channel carries two streams (RNS multiplexes above the sequence). A reader
+        // bound to stream 5 delivers only stream 5's bytes in order, ignores stream 9,
+        // and reports eof from stream 5 — not from stream 9's earlier eof.
+        let mut r5 = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 5);
+        let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
+            r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+        };
+        feed(&mut r5, 0, StreamFrame { stream_id: 5, eof: false, compressed: false, data: vec![1, 2, 3] });
+        feed(&mut r5, 1, StreamFrame { stream_id: 9, eof: false, compressed: false, data: vec![0xAA] });
+        feed(&mut r5, 2, StreamFrame { stream_id: 5, eof: false, compressed: false, data: vec![4, 5] });
+        feed(&mut r5, 3, StreamFrame { stream_id: 9, eof: true, compressed: false, data: vec![] });
+        assert!(!r5.recv_finished(), "stream 9's eof must not end stream 5");
+        feed(&mut r5, 4, StreamFrame { stream_id: 5, eof: true, compressed: false, data: vec![6] });
+        assert_eq!(r5.read_available(), vec![1, 2, 3, 4, 5, 6], "only stream 5, in order");
+        assert!(r5.recv_finished(), "stream 5's eof");
+    }
+
+    #[test]
+    fn compressed_frame_is_flagged_not_corrupting() {
+        // retinue can't decode a bz2-compressed frame yet. It must drop those bytes and
+        // surface it, never splice compressed bytes into the stream as if they were data.
+        let mut r = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 0);
+        let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
+            r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+        };
+        feed(&mut r, 0, StreamFrame { stream_id: 0, eof: false, compressed: false, data: vec![1, 2] });
+        feed(&mut r, 1, StreamFrame { stream_id: 0, eof: false, compressed: true, data: vec![9, 9, 9] });
+        feed(&mut r, 2, StreamFrame { stream_id: 0, eof: false, compressed: false, data: vec![3] });
+        assert_eq!(r.read_available(), vec![1, 2, 3], "compressed bytes dropped, not appended");
+        assert!(r.had_unsupported_frame(), "the compressed frame was surfaced");
+    }
+
+    #[test]
+    fn buffer_stream_round_trips_with_finish() {
+        // The everyday path: write a payload and finish() over the lossless proof model;
+        // the reader reconstructs it exactly and sees eof.
+        let mut tx = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), MAX_DATA_LEN, 3, 3);
+        let mut rx = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), MAX_DATA_LEN, 3, 3);
+        let payload: Vec<u8> = (0..2000u32).map(|i| (i * 7 + 1) as u8).collect();
+        tx.write(&payload);
+        tx.finish();
+        let mut got = Vec::new();
+        for now in 0..100_000u64 {
+            let envs = tx.poll_transmit(now);
+            if envs.is_empty() && tx.send_idle() {
+                break;
+            }
+            for e in envs {
+                let seq = e.sequence;
+                rx.handle(e);
+                tx.on_proof(seq, now);
+            }
+            got.extend(rx.read_available());
+        }
+        got.extend(rx.read_available());
+        assert_eq!(got, payload, "stream reconstructs exactly");
+        assert!(rx.recv_finished(), "reader saw the writer's eof");
     }
 }
