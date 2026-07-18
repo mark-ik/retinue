@@ -1161,12 +1161,15 @@ output; the constants are public class attributes; the packet context is `RNS.Pa
   thresholds `RTT_SLOW/MEDIUM/FAST = 1.45/0.75/0.18 s`, with `WINDOW_MIN_LIMIT_*` floors
   (2/5/16) and `WINDOW_FLEXIBILITY = 4`; `FAST_RATE_THRESHOLD = 10` consecutive successes to
   step up. `WINDOW_MIN = 2`, `WINDOW_MAX = 48`.
-- **Acknowledgement — OPEN (O-18, ack/retry half).** No ack envelope was observed; RNS Channel almost
-  certainly reuses the **link packet proof** as the per-sequence ack (each envelope packet is
-  proof-requesting; unproven sequences retransmit). This differs from retinue's current
-  explicit `Frame::Ack` and must be confirmed by a link-level capture before the wire is pinned.
-  The *machinery* (sequencing, window, retransmit, reorder-buffer) is unchanged; only the ack
-  signal moves from an explicit frame to the link proof.
+- **Acknowledgement — CONFIRMED 2026-07-17 (proof-based).** Captured over a real link
+  (`oracle/capture_channel_link.py`, fixture `channel_link.json`): with a channel message sent
+  and the receiver staying silent, RNS **retransmitted the identical seq-0 envelope 5 times**.
+  So the ack is the **link packet proof**, not an ack envelope — each channel packet is
+  proof-requesting, and an unproven sequence is retransmitted. This differs from retinue's
+  current explicit `Frame::Ack`, which must go. The *machinery* (sequencing, window, retransmit,
+  reorder-buffer) is unchanged; only the ack signal moves from an explicit frame to the link
+  proof. The same capture also confirmed the envelope on the real encrypted wire, not just from
+  `pack()`: `abcd 0000 000d "channel-hello"`.
 
 **Implication for retinue.** The `channel` module built 2026-07-17 has the right machinery,
 tested against the loss oracle, but its own wire. To become RNS-Channel-compatible: (1) swap the
@@ -1201,7 +1204,7 @@ Ranked by blast radius: how badly a wrong guess hurts, and how silently.
 | **O-15** | **Path response.** Is an announce delivered as a path response distinguished by context byte 0x0B? Issue a path request (destination `rnstransport.path.request`, 51-byte packet = 19 + 32) and dump the context byte of what comes back. Also confirms the real Plain destination hash (expected `6b9f66014d9853faab220fba47d02761`) and the type-2 address order in one experiment. | Cannot distinguish solicited from spontaneous announces. Cheap; settles three questions at once. |
 | **O-16** | **Link close (0xFC) and identify (0xFB) payloads.** Both are dead constants in the crate; `Link::close()` sends nothing. Encrypted or plaintext? What plaintext? | Blocks R3's teardown and R4's `ALLOW_LIST`. |
 | **O-17** | **Resource wire format, in full.** Advertisement, part, part request, hashmap update, proof, cancel: serialization format, field order, integer widths, flags, hashmap encoding, windowing model, segmentation ceiling, compression algorithm. | **Blocks all of R4.** Nothing is known below the context codes. |
-| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** ~~Sequence-number width, message-type tag~~, ack/retry scheme, `stream_id` encoding, EOF marker. **PARTIALLY ANSWERED 2026-07-17** (§3.9, fixture `channel_wire.json`): envelope = `[msgtype u16][seq u16][len u16][payload]` under context 14; seq windowed 16-bit; dynamic window constants captured. **Remaining:** the ack/retry scheme (a link-level capture — confirm RNS uses the link packet *proof* as the per-sequence ack, not an ack envelope) and Buffer's `stream_id`/EOF framing. | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
+| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** ~~Sequence-number width, message-type tag, ack/retry scheme~~, `stream_id` encoding, EOF marker. **MOSTLY ANSWERED 2026-07-17** (§3.9; fixtures `channel_wire.json`, `channel_link.json`): envelope = `[msgtype u16][seq u16][len u16][payload]` under context 14; seq windowed 16-bit; dynamic window constants captured; **ack/retry = the link packet proof** — an unproven sequence retransmits (confirmed: 5 resends of seq 0 with no ack). **Remaining:** Buffer's `stream_id` encoding and EOF marker (a `Buffer.create_bidirectional_buffer` capture). | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
 | **O-19** | **Multi-aspect edge cases.** Zero aspects (is the trailing `.` omitted?), an empty-string aspect, a non-ASCII aspect. Beechat takes aspects as a single pre-dotted string and never exercises the join. | Wrong destination hashes for a class of names. Cheap. |
 | **O-20** | **Random hash structure.** Are the 10 bytes pure randomness, or is part a timestamp? Capture several announces from one destination seconds apart and look for monotonic structure. | Signature interop is unaffected (the field is opaque to a verifier). Only affects de-dup and freshness. Low. |
 | **O-21** | **MDU enforcement on receive.** Does RNS drop an over-MDU packet on ingress, or only refuse to emit one? Is the ceiling 464 or 465? | Determines how strict our decoder should be. Low. |

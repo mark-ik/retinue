@@ -1,0 +1,20 @@
+{
+  "description": "RNS 1.3.8 Channel over a real link. context-14 packets captured and decrypted with the derived link key. We never acknowledged; retransmit_counts shows how often each identical envelope was resent, which reveals proof-based reliability.",
+  "rns_version": "1.3.8",
+  "link_id_hex": "884427832578c7b9f18142069008daae",
+  "channel_payload": "channel-hello",
+  "context": 14,
+  "distinct_channel_packets": 5,
+  "decoded_envelopes": 5,
+  "first_envelope_hex": "abcd0000000d6368616e6e656c2d68656c6c6f",
+  "first_envelope_parsed": {
+    "msgtype": 43981,
+    "sequence": 0,
+    "length": 13,
+    "payload_hex": "6368616e6e656c2d68656c6c6f"
+  },
+  "retransmit_counts": {
+    "abcd0000000d6368616e6e656c2d68656c6c6f": 5
+  },
+  "retransmitted_without_ack": true
+}
