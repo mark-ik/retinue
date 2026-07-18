@@ -1242,9 +1242,17 @@ the `Link::data_proof` / `Link::verify_data_proof` wrappers) build and validate 
 reproduces RNS's captured proof **byte for byte** — Ed25519 is deterministic, so signing the same
 hash with the same identity yields RNS's exact signature — and validates RNS's own proof back. This
 is the ack primitive the Channel driver rides: prove a received data packet, and match an inbound
-proof's hash to the outstanding sequence it releases. What remains is the driver itself — pumping
-`Channel::poll_transmit` on a clock, emitting a proof per delivered packet, and calling `on_proof`
-when a proof's hash lands — wiring the reliable stream under `endpoint::LinkStream`.
+proof's hash to the outstanding sequence it releases.
+
+**The driver is now wired (2026-07-18).** `reliable::ReliableChannel` composes Buffer + this proof
+sans-io, and `endpoint::register_reliable_stream` drives it under a mode-gated `LinkStream`:
+`open_reliable` / `accept_reliable` / `register_reliable` opt in; the router dispatches channel-data
+and proof packets to a per-link driver task that pumps `poll_transmit` on a clock, proves each
+delivered packet, and releases acked sequences. Proven over the loss oracle (sans-io) and end to end
+between two endpoints (`tests/reliable_stream.rs`). The one open interop edge is the initiator's
+identity on the wire: retinue as responder proves with its identity (validated via the announce, as
+captured here), but a retinue **initiator**'s proofs need an `identify`-over-link step before an RNS
+responder can validate them — a follow-on, orthogonal to this wire.
 
 ---
 
