@@ -1,266 +1,239 @@
-//! A reliable, in-order message layer over a link — the machinery beneath RNS
-//! `Channel`/`Buffer`.
+//! A reliable, in-order message layer over a link — RNS `Channel`, wire-compatible.
 //!
 //! Raw link data packets are best-effort by spec: over TCP they never drop, so an
 //! `AsyncRead`/`AsyncWrite` link is reliable *by accident of the medium*. Over LoRa
 //! or serial they drop, reorder, and delay, and a stream that returns `Ok` for bytes
-//! that never arrive is lying to its caller. This module is the layer that makes the
-//! stream honest on any medium: sequence numbers, cumulative acknowledgement, a send
-//! window, retransmission on timeout, and receiver-side reordering.
+//! that never arrive is lying to its caller. This is the layer that makes the stream
+//! honest on any medium: sequence numbers, a send window, retransmission of unproven
+//! packets, and receiver-side reordering.
 //!
-//! It is **sans-io**: [`Channel`] holds no sockets and no clock. The caller drives it
-//! — [`poll_transmit`](Channel::poll_transmit) with the current time yields the
-//! frames to put on the wire (new data within the window, retransmits past their
-//! timeout, and pending acks), and [`handle`](Channel::handle) feeds received frames
-//! back in. That makes it testable against a deterministic loss model on a virtual
-//! clock, which is the only way the retransmit and reorder paths actually execute
-//! (see `retinue::lossy`).
+//! The wire is RNS 1.3.8's, captured black-box (see
+//! `design_docs/2026-07-13_rns_wire_format_reference.md` §3.9, fixtures
+//! `channel_wire.json` / `channel_link.json`):
 //!
-//! The wire here (`[type][seq]` framing over u32 sequence numbers) is retinue's own,
-//! chosen to make the machinery testable now. Pinning it to the RNS `Channel` wire —
-//! its 16-bit windowed sequence and message envelope — is a capture-gated follow-on,
-//! the same discipline as every other retinue wire format.
+//! - A message is an [`Envelope`] — `[msgtype u16][sequence u16][length u16][payload]`,
+//!   big-endian — carried in a link data packet with context `14` (`0x0e`).
+//! - The sequence is windowed **16-bit** (mod [`SEQ_MODULUS`]).
+//! - **Acknowledgement is the link packet proof, not an ack message.** Each envelope
+//!   packet is proof-requesting; an unproven sequence is retransmitted. Confirmed by
+//!   capture: RNS resent a seq-0 envelope 5 times while the receiver stayed silent.
+//!
+//! It is **sans-io**: [`Channel`] holds no sockets and no clock. The caller (a link
+//! driver) drives it — [`poll_transmit`](Channel::poll_transmit) with the current
+//! time yields the envelopes to put on the wire (new data within the window, plus
+//! retransmits past their timeout); [`handle`](Channel::handle) feeds received
+//! envelopes back in; and [`on_proof`](Channel::on_proof) releases an outstanding
+//! sequence when its packet's proof arrives (the driver maps proof-by-packet-hash to
+//! sequence). That is exactly what makes the retransmit and reorder paths testable
+//! against a deterministic loss model on a virtual clock (see `retinue::lossy`).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
-/// Maximum unacknowledged messages in flight. A small window is enough to keep a
-/// slow link busy without overrunning a slow receiver; RNS grows this dynamically
-/// (deferred — the fixed window is correct, just not yet adaptive).
+/// The sequence space: sequences are 16-bit and wrap at this modulus (RNS
+/// `SEQ_MODULUS`). Comparisons use wrapping distance with a half-modulus split to
+/// tell "ahead" (a future packet to buffer) from "behind" (an old duplicate).
+pub const SEQ_MODULUS: u32 = 65536;
+
+/// Maximum unacknowledged envelopes in flight. RNS starts at 2 and grows toward an
+/// RTT-tiered maximum (dynamic window sizing, deferred — the fixed window is correct,
+/// just not yet adaptive; the tier constants are recorded in the wire reference).
 pub const DEFAULT_WINDOW: u32 = 8;
 
-/// Ticks without an ack before an outstanding message is retransmitted. "Tick" is
-/// whatever unit the caller passes to [`Channel::poll_transmit`] (milliseconds over
-/// a real clock; a counter in tests).
+/// Ticks without a proof before an outstanding envelope is retransmitted. "Tick" is
+/// whatever unit the caller passes to [`Channel::poll_transmit`] (milliseconds over a
+/// real clock; a counter in tests).
 pub const DEFAULT_RETX_TIMEOUT: u64 = 4;
 
-/// One channel frame on the wire.
+/// A retinue message-type tag for opaque stream bytes, until RNS's `Buffer` stream
+/// msgtype + EOF framing are captured (the remaining half of O-18). `Buffer` uses it;
+/// it is not yet RNS-`Buffer`-wire-compatible, though the `Channel` envelope carrying
+/// it is.
+pub const STREAM_MSGTYPE: u16 = 0xF900;
+
+/// One channel message on the wire: `[msgtype u16][sequence u16][length u16][payload]`,
+/// big-endian. This is RNS 1.3.8's `Channel.Envelope` layout exactly.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Frame {
-    /// A sequenced payload.
-    Data {
-        /// Monotonic sequence number.
-        seq: u32,
-        /// Application bytes.
-        payload: Vec<u8>,
-    },
-    /// A cumulative acknowledgement: the sender may release every sequence `< next`.
-    Ack {
-        /// The next sequence the receiver still needs (everything below is held).
-        next: u32,
-    },
+pub struct Envelope {
+    /// Registered message type (identifies the message class on the wire).
+    pub msgtype: u16,
+    /// Windowed 16-bit sequence number.
+    pub sequence: u16,
+    /// Message payload.
+    pub payload: Vec<u8>,
 }
 
-impl Frame {
-    /// Encode to bytes: `[0x00][seq u32 BE][payload]` for data, `[0x01][next u32 BE]`
-    /// for an ack.
+impl Envelope {
+    /// Encode to the RNS wire layout.
     pub fn encode(&self) -> Vec<u8> {
-        match self {
-            Frame::Data { seq, payload } => {
-                let mut out = Vec::with_capacity(5 + payload.len());
-                out.push(0x00);
-                out.extend_from_slice(&seq.to_be_bytes());
-                out.extend_from_slice(payload);
-                out
-            }
-            Frame::Ack { next } => {
-                let mut out = Vec::with_capacity(5);
-                out.push(0x01);
-                out.extend_from_slice(&next.to_be_bytes());
-                out
-            }
-        }
+        let mut out = Vec::with_capacity(6 + self.payload.len());
+        out.extend_from_slice(&self.msgtype.to_be_bytes());
+        out.extend_from_slice(&self.sequence.to_be_bytes());
+        out.extend_from_slice(&(self.payload.len() as u16).to_be_bytes());
+        out.extend_from_slice(&self.payload);
+        out
     }
 
-    /// Decode a frame, or `None` if the bytes are malformed.
-    pub fn decode(bytes: &[u8]) -> Option<Frame> {
-        let (&kind, rest) = bytes.split_first()?;
-        let seq_bytes: [u8; 4] = rest.get(..4)?.try_into().ok()?;
-        let seq = u32::from_be_bytes(seq_bytes);
-        match kind {
-            0x00 => Some(Frame::Data {
-                seq,
-                payload: rest[4..].to_vec(),
-            }),
-            0x01 => Some(Frame::Ack { next: seq }),
-            _ => None,
-        }
+    /// Decode from the RNS wire layout, or `None` if malformed / the declared length
+    /// does not match.
+    pub fn decode(bytes: &[u8]) -> Option<Envelope> {
+        let msgtype = u16::from_be_bytes(bytes.get(0..2)?.try_into().ok()?);
+        let sequence = u16::from_be_bytes(bytes.get(2..4)?.try_into().ok()?);
+        let length = u16::from_be_bytes(bytes.get(4..6)?.try_into().ok()? ) as usize;
+        let payload = bytes.get(6..6 + length)?.to_vec();
+        Some(Envelope { msgtype, sequence, payload })
     }
 }
 
-/// One un-acknowledged outbound message.
+/// One un-acknowledged outbound envelope.
 struct Outstanding {
-    seq: u32,
     payload: Vec<u8>,
     last_tx: u64,
 }
 
 /// A reliable, in-order message channel. See the module docs.
 pub struct Channel {
-    // ── send side ──
-    /// Application messages not yet assigned a sequence (waiting for window room).
-    outgoing: VecDeque<Vec<u8>>,
-    /// In-flight, unacknowledged: sequences `[send_base, send_next)`.
-    outstanding: VecDeque<Outstanding>,
-    send_base: u32,
-    send_next: u32,
+    msgtype: u16,
     window: u32,
     retx_timeout: u64,
 
+    // ── send side ──
+    /// Application payloads not yet assigned a sequence (waiting for window room).
+    outgoing: VecDeque<Vec<u8>>,
+    /// In-flight, unacknowledged, keyed by sequence. Released by [`on_proof`].
+    outstanding: HashMap<u16, Outstanding>,
+    /// The next sequence to assign (wraps at `SEQ_MODULUS`).
+    send_next: u16,
+
     // ── receive side ──
-    /// Next sequence we can deliver in order.
-    recv_next: u32,
+    /// The next sequence we can deliver in order.
+    recv_next: u16,
     /// Received-but-not-yet-deliverable, held until the gap before them fills.
-    reorder: BTreeMap<u32, Vec<u8>>,
+    reorder: BTreeMap<u16, Vec<u8>>,
     /// Delivered, in order, ready for the application to read.
     inbox: VecDeque<Vec<u8>>,
-    /// A data frame arrived since the last transmit, so an ack is owed.
-    ack_owed: bool,
 }
 
 impl Default for Channel {
     fn default() -> Self {
-        Self::new()
+        Self::new(STREAM_MSGTYPE)
     }
 }
 
 impl Channel {
-    /// A channel with the default window and retransmit timeout.
-    pub fn new() -> Self {
-        Self::with_params(DEFAULT_WINDOW, DEFAULT_RETX_TIMEOUT)
+    /// A channel for one message type, with the default window and retransmit timeout.
+    pub fn new(msgtype: u16) -> Self {
+        Self::with_params(msgtype, DEFAULT_WINDOW, DEFAULT_RETX_TIMEOUT)
     }
 
     /// A channel with an explicit window and retransmit timeout (for tests and, later,
     /// dynamic window sizing).
-    pub fn with_params(window: u32, retx_timeout: u64) -> Self {
+    pub fn with_params(msgtype: u16, window: u32, retx_timeout: u64) -> Self {
         Self {
-            outgoing: VecDeque::new(),
-            outstanding: VecDeque::new(),
-            send_base: 0,
-            send_next: 0,
+            msgtype,
             window: window.max(1),
             retx_timeout,
+            outgoing: VecDeque::new(),
+            outstanding: HashMap::new(),
+            send_next: 0,
             recv_next: 0,
             reorder: BTreeMap::new(),
             inbox: VecDeque::new(),
-            ack_owed: false,
         }
     }
 
-    /// Queue an application message for reliable, in-order delivery. It is assigned a
-    /// sequence and put on the wire by [`poll_transmit`](Self::poll_transmit) as the
-    /// window allows.
+    /// Queue a payload for reliable, in-order delivery. Assigned a sequence and put on
+    /// the wire by [`poll_transmit`](Self::poll_transmit) as the window allows.
     pub fn send(&mut self, payload: Vec<u8>) {
         self.outgoing.push_back(payload);
     }
 
-    /// The frames to transmit at time `now`: newly sendable data within the window,
-    /// retransmissions of outstanding data past the retransmit timeout, and a pending
-    /// acknowledgement if one is owed.
-    pub fn poll_transmit(&mut self, now: u64) -> Vec<Frame> {
-        let mut frames = Vec::new();
+    /// The envelopes to transmit at time `now`: newly sendable data within the window,
+    /// and retransmissions of outstanding envelopes past the retransmit timeout. There
+    /// is no ack envelope — acknowledgement is the link proof, delivered via
+    /// [`on_proof`](Self::on_proof).
+    pub fn poll_transmit(&mut self, now: u64) -> Vec<Envelope> {
+        let mut out = Vec::new();
 
         // Fill the window with fresh data.
-        while self.outstanding.len() < self.window as usize {
+        while (self.outstanding.len() as u32) < self.window {
             let Some(payload) = self.outgoing.pop_front() else {
                 break;
             };
             let seq = self.send_next;
-            self.send_next += 1;
-            self.outstanding.push_back(Outstanding {
-                seq,
-                payload: payload.clone(),
-                last_tx: now,
-            });
-            frames.push(Frame::Data { seq, payload });
+            self.send_next = self.send_next.wrapping_add(1);
+            out.push(Envelope { msgtype: self.msgtype, sequence: seq, payload: payload.clone() });
+            self.outstanding.insert(seq, Outstanding { payload, last_tx: now });
         }
 
-        // Retransmit anything unacked for too long.
-        for o in &mut self.outstanding {
+        // Retransmit anything unproven for too long.
+        for (&seq, o) in &mut self.outstanding {
             if now.saturating_sub(o.last_tx) >= self.retx_timeout {
                 o.last_tx = now;
-                frames.push(Frame::Data {
-                    seq: o.seq,
-                    payload: o.payload.clone(),
-                });
+                out.push(Envelope { msgtype: self.msgtype, sequence: seq, payload: o.payload.clone() });
             }
         }
 
-        // One cumulative ack carries acknowledgement of everything received so far.
-        if self.ack_owed {
-            self.ack_owed = false;
-            frames.push(Frame::Ack {
-                next: self.recv_next,
-            });
-        }
-
-        frames
+        out
     }
 
-    /// Process a received frame.
-    pub fn handle(&mut self, frame: Frame) {
-        match frame {
-            Frame::Ack { next } => {
-                // Cumulative: release every outstanding sequence below `next`.
-                let next = next.min(self.send_next);
-                if next > self.send_base {
-                    self.send_base = next;
-                    while self.outstanding.front().is_some_and(|o| o.seq < next) {
-                        self.outstanding.pop_front();
-                    }
-                }
-            }
-            Frame::Data { seq, payload } => {
-                // Every data frame owes an ack, even a duplicate — the sender may be
-                // retransmitting because our earlier ack was itself lost.
-                self.ack_owed = true;
-                match seq.cmp(&self.recv_next) {
-                    std::cmp::Ordering::Equal => {
-                        self.inbox.push_back(payload);
-                        self.recv_next += 1;
-                        // Pull any now-contiguous buffered frames into order.
-                        while let Some(next) = self.reorder.remove(&self.recv_next) {
-                            self.inbox.push_back(next);
-                            self.recv_next += 1;
-                        }
-                    }
-                    std::cmp::Ordering::Greater => {
-                        // Future frame: hold it until the gap fills.
-                        self.reorder.entry(seq).or_insert(payload);
-                    }
-                    std::cmp::Ordering::Less => {
-                        // Already delivered: drop the payload, keep the ack.
-                    }
-                }
-            }
-        }
+    /// Release an outstanding sequence: its packet's proof arrived. Selective — RNS
+    /// proves each packet individually, so this frees exactly one sequence.
+    pub fn on_proof(&mut self, sequence: u16) {
+        self.outstanding.remove(&sequence);
     }
 
-    /// The next in-order application message, if one is ready.
+    /// Process a received envelope, delivering it or buffering it for reordering.
+    ///
+    /// The driver proves the underlying packet at the link layer regardless (an
+    /// unproven sender retransmits, and the receiver must re-prove duplicates), so this
+    /// never needs to signal a proof — it only orders delivery.
+    pub fn handle(&mut self, envelope: Envelope) {
+        let ahead = envelope.sequence.wrapping_sub(self.recv_next);
+        if ahead == 0 {
+            self.inbox.push_back(envelope.payload);
+            self.recv_next = self.recv_next.wrapping_add(1);
+            // Pull any now-contiguous buffered envelopes into order.
+            while let Some(next) = self.reorder.remove(&self.recv_next) {
+                self.inbox.push_back(next);
+                self.recv_next = self.recv_next.wrapping_add(1);
+            }
+        } else if (ahead as u32) < SEQ_MODULUS / 2 {
+            // A future sequence within the forward half of the space: hold it.
+            self.reorder.entry(envelope.sequence).or_insert(envelope.payload);
+        }
+        // Otherwise the sequence is behind `recv_next` (an already-delivered
+        // duplicate); drop the payload. The driver still proves the packet.
+    }
+
+    /// The next in-order application payload, if one is ready.
     pub fn recv(&mut self) -> Option<Vec<u8>> {
         self.inbox.pop_front()
     }
 
-    /// Whether everything queued to send has been sent and acknowledged.
+    /// Whether everything queued to send has been sent and proven.
     pub fn send_idle(&self) -> bool {
         self.outgoing.is_empty() && self.outstanding.is_empty()
     }
 
-    /// Count of in-flight, unacknowledged messages.
+    /// Count of in-flight, unproven envelopes.
     pub fn in_flight(&self) -> usize {
         self.outstanding.len()
     }
 }
 
-/// Default per-message chunk: sized to sit inside a link data packet (`MDU` 464,
-/// less channel framing and link encryption overhead) with margin.
+/// Default per-message chunk: sized to sit inside a link data packet (`MDU` 464, less
+/// channel framing and link encryption overhead) with margin.
 pub const DEFAULT_CHUNK: usize = 384;
 
-/// A byte stream over a reliable [`Channel`]: [`write`](Self::write) chunks bytes
-/// into channel messages, [`read`](Self::read) concatenates delivered messages in
-/// order. This is the stream-shaped, reliable face of `Channel` — the piece an
-/// `AsyncRead + AsyncWrite` link binds to once a driver pumps
-/// [`poll_transmit`](Self::poll_transmit) / [`handle`](Self::handle) against the
-/// wire. Sans-io like `Channel`; it adds only the byte<->message boundary.
+/// A byte stream over a reliable [`Channel`]: [`write`](Self::write) chunks bytes into
+/// channel messages, [`read`](Self::read) concatenates delivered messages in order.
+/// The stream-shaped, reliable face of `Channel` — the piece an `AsyncRead + AsyncWrite`
+/// link binds to once a driver pumps [`poll_transmit`](Self::poll_transmit) /
+/// [`handle`](Self::handle) / [`on_proof`](Self::on_proof) against the wire. Sans-io
+/// like `Channel`; it adds only the byte<->message boundary.
+///
+/// Uses [`STREAM_MSGTYPE`]; RNS's own `Buffer` stream msgtype + EOF framing are the
+/// remaining half of O-18 and pin later.
 pub struct Buffer {
     channel: Channel,
     max_chunk: usize,
@@ -274,18 +247,14 @@ impl Default for Buffer {
 }
 
 impl Buffer {
-    /// A buffer with the default window, timeout, and chunk size.
+    /// A buffer with the default channel and chunk size.
     pub fn new() -> Self {
-        Self::with_channel(Channel::new(), DEFAULT_CHUNK)
+        Self::with_channel(Channel::new(STREAM_MSGTYPE), DEFAULT_CHUNK)
     }
 
     /// A buffer over an explicit channel and chunk size.
     pub fn with_channel(channel: Channel, max_chunk: usize) -> Self {
-        Self {
-            channel,
-            max_chunk: max_chunk.max(1),
-            read_buf: VecDeque::new(),
-        }
+        Self { channel, max_chunk: max_chunk.max(1), read_buf: VecDeque::new() }
     }
 
     /// Queue bytes for reliable, in-order delivery, chunked into channel messages.
@@ -311,24 +280,28 @@ impl Buffer {
         self.read_buf.drain(..).collect()
     }
 
-    /// Drain any newly-delivered channel messages into the byte read buffer.
     fn fill(&mut self) {
         while let Some(msg) = self.channel.recv() {
             self.read_buf.extend(msg);
         }
     }
 
-    /// Frames to put on the wire now — see [`Channel::poll_transmit`].
-    pub fn poll_transmit(&mut self, now: u64) -> Vec<Frame> {
+    /// Envelopes to put on the wire now — see [`Channel::poll_transmit`].
+    pub fn poll_transmit(&mut self, now: u64) -> Vec<Envelope> {
         self.channel.poll_transmit(now)
     }
 
-    /// Feed a received frame in — see [`Channel::handle`].
-    pub fn handle(&mut self, frame: Frame) {
-        self.channel.handle(frame);
+    /// Feed a received envelope in — see [`Channel::handle`].
+    pub fn handle(&mut self, envelope: Envelope) {
+        self.channel.handle(envelope);
     }
 
-    /// Whether everything written has been sent and acknowledged.
+    /// Release a proven sequence — see [`Channel::on_proof`].
+    pub fn on_proof(&mut self, sequence: u16) {
+        self.channel.on_proof(sequence);
+    }
+
+    /// Whether everything written has been sent and proven.
     pub fn send_idle(&self) -> bool {
         self.channel.send_idle()
     }
@@ -336,36 +309,46 @@ impl Buffer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Buffer, Channel, Frame};
+    use super::{Buffer, Channel, Envelope};
     use crate::lossy::LossModel;
 
     #[test]
-    fn frame_round_trips() {
-        let data = Frame::Data {
-            seq: 0x0A0B_0C0D,
-            payload: b"hello".to_vec(),
-        };
-        assert_eq!(Frame::decode(&data.encode()), Some(data));
-        let ack = Frame::Ack { next: 42 };
-        assert_eq!(Frame::decode(&ack.encode()), Some(ack));
-        assert_eq!(Frame::decode(&[0x00]), None);
+    fn envelope_matches_rns_capture() {
+        // Gold test: retinue's envelope encoding equals RNS 1.3.8's own Envelope.pack()
+        // for every captured vector. Ties the wire to the black-box capture.
+        let fixture = include_str!("../tests/fixtures/channel_wire.json");
+        let doc: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        for v in doc["envelope_vectors"].as_array().unwrap() {
+            let msgtype = v["msgtype"].as_u64().unwrap() as u16;
+            let sequence = v["sequence"].as_u64().unwrap() as u16;
+            let payload = hex_bytes(v["payload_hex"].as_str().unwrap());
+            let expected = v["packed_hex"].as_str().unwrap();
+            let env = Envelope { msgtype, sequence, payload };
+            assert_eq!(hex_str(&env.encode()), expected, "encode must equal RNS pack()");
+            assert_eq!(Envelope::decode(&env.encode()), Some(env), "round-trip");
+        }
+    }
+
+    fn hex_bytes(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+    fn hex_str(b: &[u8]) -> String {
+        b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
     #[test]
     fn lossless_in_order_delivery() {
-        // No loss, no reorder: everything arrives once, in order.
-        let mut tx = Channel::new();
-        let mut rx = Channel::new();
+        let mut tx = Channel::new(0xABCD);
+        let mut rx = Channel::new(0xABCD);
         for i in 0u8..20 {
             tx.send(vec![i]);
         }
         let mut got = Vec::new();
         for now in 0..1000 {
-            for f in tx.poll_transmit(now) {
-                rx.handle(f);
-            }
-            for f in rx.poll_transmit(now) {
-                tx.handle(f);
+            for e in tx.poll_transmit(now) {
+                let seq = e.sequence;
+                rx.handle(e);
+                tx.on_proof(seq); // lossless: every packet is immediately proven
             }
             while let Some(m) = rx.recv() {
                 got.push(m[0]);
@@ -377,137 +360,102 @@ mod tests {
         assert_eq!(got, (0u8..20).collect::<Vec<_>>());
     }
 
-    /// Run a whole byte stream from `tx` to `rx` across a deterministic lossy pipe on
-    /// a virtual clock, and return what `rx` reconstructs. `drop`/`delay` seeds and
-    /// rates make every drop, delay, and reorder reproducible.
-    fn stream_over_loss(drop_per_mille: u32, max_delay_ticks: u64, seed: u64) -> Vec<u8> {
-        let payload: Vec<u8> = (0..4000u32).map(|i| (i * 31 + 7) as u8).collect();
-        let mut tx = Channel::new();
-        let mut rx = Channel::new();
-        for chunk in payload.chunks(48) {
-            tx.send(chunk.to_vec());
-        }
-
-        // A loss model per direction; delay in ticks reorders frames.
-        let mut fwd = LossModel::new(seed)
-            .drop_per_mille(drop_per_mille)
-            .max_delay_ms(max_delay_ticks);
-        let mut bwd = LossModel::new(seed ^ 0xFFFF)
-            .drop_per_mille(drop_per_mille)
-            .max_delay_ms(max_delay_ticks);
-
-        // (arrival_tick, frame) in flight in each direction.
-        let mut to_rx: Vec<(u64, Frame)> = Vec::new();
-        let mut to_tx: Vec<(u64, Frame)> = Vec::new();
-        let mut got: Vec<u8> = Vec::new();
-
-        for now in 0..1_000_000u64 {
-            for f in tx.poll_transmit(now) {
-                if !fwd.should_drop() {
-                    to_rx.push((now + 1 + fwd.delay_ms(), f));
-                }
-            }
-            for f in rx.poll_transmit(now) {
-                if !bwd.should_drop() {
-                    to_tx.push((now + 1 + bwd.delay_ms(), f));
-                }
-            }
-            to_rx.retain(|(t, f)| {
-                if *t <= now {
-                    rx.handle(f.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            to_tx.retain(|(t, f)| {
-                if *t <= now {
-                    tx.handle(f.clone());
-                    false
-                } else {
-                    true
-                }
-            });
-            while let Some(m) = rx.recv() {
-                got.extend_from_slice(&m);
-            }
-            if got.len() == payload.len() && tx.send_idle() {
-                break;
-            }
-        }
-        assert_eq!(got, payload, "stream must reconstruct exactly");
-        got
-    }
-
-    #[test]
-    fn stream_survives_drop() {
-        // 30% packet loss, no delay: retransmission recovers every chunk, in order.
-        stream_over_loss(300, 0, 11);
-    }
-
-    #[test]
-    fn stream_survives_drop_reorder_and_delay() {
-        // 25% loss plus up to 6 ticks of jitter (which reorders): the reorder buffer
-        // plus retransmission still reconstruct the stream byte-for-byte.
-        stream_over_loss(250, 6, 99);
-    }
-
-    #[test]
-    fn heavy_loss_still_converges() {
-        // 60% loss is brutal but retransmission is unconditional, so it still lands.
-        stream_over_loss(600, 3, 7);
-    }
-
-    #[test]
-    fn buffer_byte_stream_survives_loss() {
-        // The stream-shaped face: write a blob into one Buffer, read it whole out of
-        // the other across a lossy pipe. Exercises the byte<->message boundary on top
-        // of the reliability the channel tests already prove.
-        let blob: Vec<u8> = (0..5000u32)
-            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
-            .collect();
+    /// Run a byte stream through two Buffers across a deterministic lossy pipe on a
+    /// virtual clock, proving each delivered envelope back (subject to loss) — the
+    /// proof-based model. Returns nothing; asserts exact reconstruction.
+    fn stream_over_loss(drop_per_mille: u32, max_delay_ticks: u64, seed: u64) {
+        let payload: Vec<u8> = (0..4000u32).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
         let mut tx = Buffer::new();
         let mut rx = Buffer::new();
-        tx.write(&blob);
+        tx.write(&payload);
 
-        let mut fwd = LossModel::new(3).drop_per_mille(200).max_delay_ms(5);
-        let mut bwd = LossModel::new(4).drop_per_mille(200).max_delay_ms(5);
-        let mut to_rx: Vec<(u64, Frame)> = Vec::new();
-        let mut to_tx: Vec<(u64, Frame)> = Vec::new();
+        let mut fwd = LossModel::new(seed).drop_per_mille(drop_per_mille).max_delay_ms(max_delay_ticks);
+        let mut bwd = LossModel::new(seed ^ 0xFFFF).drop_per_mille(drop_per_mille).max_delay_ms(max_delay_ticks);
+
+        // In flight: (arrival_tick, item). Forward carries envelopes; back carries the
+        // sequence of a proof (the link auto-proves every received packet).
+        let mut to_rx: Vec<(u64, Envelope)> = Vec::new();
+        let mut to_tx: Vec<(u64, u16)> = Vec::new();
         let mut got: Vec<u8> = Vec::new();
 
         for now in 0..1_000_000u64 {
-            for f in tx.poll_transmit(now) {
+            for e in tx.poll_transmit(now) {
                 if !fwd.should_drop() {
-                    to_rx.push((now + 1 + fwd.delay_ms(), f));
+                    to_rx.push((now + 1 + fwd.delay_ms(), e));
                 }
             }
-            for f in rx.poll_transmit(now) {
-                if !bwd.should_drop() {
-                    to_tx.push((now + 1 + bwd.delay_ms(), f));
-                }
-            }
-            to_rx.retain(|(t, f)| {
-                if *t <= now {
-                    rx.handle(f.clone());
-                    false
+            // Deliver due envelopes; prove each one back (dup or not).
+            let mut still = Vec::new();
+            for (t, e) in std::mem::take(&mut to_rx) {
+                if t <= now {
+                    let seq = e.sequence;
+                    rx.handle(e);
+                    if !bwd.should_drop() {
+                        to_tx.push((now + 1 + bwd.delay_ms(), seq));
+                    }
                 } else {
-                    true
+                    still.push((t, e));
                 }
-            });
-            to_tx.retain(|(t, f)| {
+            }
+            to_rx = still;
+            to_tx.retain(|(t, seq)| {
                 if *t <= now {
-                    tx.handle(f.clone());
+                    tx.on_proof(*seq);
                     false
                 } else {
                     true
                 }
             });
             got.extend(rx.read_available());
-            if got.len() == blob.len() && tx.send_idle() {
+            if got.len() == payload.len() && tx.send_idle() {
                 break;
             }
         }
-        assert_eq!(got, blob, "byte stream reconstructs exactly over loss");
+        assert_eq!(got, payload, "stream must reconstruct exactly over loss");
+    }
+
+    #[test]
+    fn stream_survives_drop() {
+        stream_over_loss(300, 0, 11);
+    }
+
+    #[test]
+    fn stream_survives_drop_reorder_and_delay() {
+        stream_over_loss(250, 6, 99);
+    }
+
+    #[test]
+    fn heavy_loss_still_converges() {
+        stream_over_loss(600, 3, 7);
+    }
+
+    #[test]
+    fn sequence_wraps_past_the_16bit_modulus() {
+        // Push more than 65536 messages so the sequence wraps, and confirm order holds
+        // across the wrap. Small window keeps it quick.
+        let mut tx = Channel::with_params(0x0001, 4, 2);
+        let mut rx = Channel::with_params(0x0001, 4, 2);
+        let total = 70_000u32; // > SEQ_MODULUS
+        let mut sent = 0u32;
+        let mut got = 0u32;
+        for now in 0..5_000_000u64 {
+            while sent < total && tx.in_flight() < 4 {
+                tx.send(vec![(sent % 251) as u8]);
+                sent += 1;
+            }
+            for e in tx.poll_transmit(now) {
+                let seq = e.sequence;
+                rx.handle(e);
+                tx.on_proof(seq);
+            }
+            while let Some(m) = rx.recv() {
+                assert_eq!(m, vec![(got % 251) as u8], "in order across the wrap");
+                got += 1;
+            }
+            if got == total {
+                break;
+            }
+        }
+        assert_eq!(got, total, "all delivered across the sequence wrap");
     }
 }
