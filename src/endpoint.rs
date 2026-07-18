@@ -581,10 +581,19 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                 .unwrap()
                 .get(&pkt.destination)
                 .map(|e| (e.link.clone(), e.inbound.clone()));
-            if let Some((link, inbound)) = entry_inbound
-                && let Some(Inbound::Data(bytes)) = link.receive(&pkt)
-            {
-                let _ = inbound.send(bytes);
+            if let Some((link, inbound)) = entry_inbound {
+                match link.receive(&pkt) {
+                    Some(Inbound::Data(bytes)) => {
+                        let _ = inbound.send(bytes);
+                    }
+                    Some(Inbound::Close) => {
+                        // The peer closed the link: drop its entry so the inbound
+                        // sender is released. The stream's inbound relay then ends
+                        // and the local reader sees EOF (what read-to-end needs).
+                        shared.links.lock().unwrap().remove(&pkt.destination);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -645,6 +654,11 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
                 break;
             }
         }
+        // The inbound channel closed: the link was torn down (a peer link-close, or
+        // the endpoint shutting down). Shut the write side explicitly so the reader
+        // sees EOF — dropping this half alone would not, since the outbound relay
+        // still holds the duplex's read half alive.
+        let _ = write_half.shutdown().await;
     });
 
     // Outbound: the stream's writes → encrypted link data packets, out the link's interface.
@@ -654,7 +668,13 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
         let mut buf = [0u8; WRITE_CHUNK];
         loop {
             match read_half.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    // The stream was shut down or dropped: close the link so the
+                    // peer's read side sees EOF. This is what lets a read-to-end
+                    // protocol (e.g. gemini) end a response by closing the stream.
+                    iv_shared.send_on(iface, out_link.close_packet());
+                    break;
+                }
                 Ok(n) => {
                     let iv = next_iv(&iv_shared);
                     iv_shared.send_on(iface, out_link.data_packet(&buf[..n], &iv));
