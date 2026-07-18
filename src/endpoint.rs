@@ -114,6 +114,69 @@ pub struct Accepted {
 /// Identifies one attached interface (one TCP connection).
 pub type InterfaceId = u32;
 
+/// A raw packet interface: the seam every transport plugs into.
+///
+/// The endpoint sends outbound [`Packet`]s to it (drain [`next_outbound`]) and
+/// receives inbound packets from it (via its [`InterfaceSink`]). Nothing here does
+/// I/O or framing — the caller owns how bytes move. TCP's interface is exactly this
+/// seam plus HDLC framing over a socket; a serial line, or a test loss-oracle that
+/// drops/delays/reorders packets, is the same seam with a different pump.
+///
+/// [`next_outbound`]: Interface::next_outbound
+pub struct Interface {
+    id: InterfaceId,
+    outbound: mpsc::UnboundedReceiver<Packet>,
+    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
+}
+
+impl Interface {
+    /// This interface's id.
+    pub fn id(&self) -> InterfaceId {
+        self.id
+    }
+
+    /// The next packet the endpoint wants to send out this interface. `None` once
+    /// the endpoint is dropped.
+    pub async fn next_outbound(&mut self) -> Option<Packet> {
+        self.outbound.recv().await
+    }
+
+    /// A cloneable handle for delivering packets received on this interface into
+    /// the endpoint's router.
+    pub fn sink(&self) -> InterfaceSink {
+        InterfaceSink {
+            id: self.id,
+            router_tx: self.router_tx.clone(),
+        }
+    }
+
+    /// Split into the outbound packet stream and an inbound [`InterfaceSink`], the
+    /// usual shape for a bidirectional pump.
+    pub fn split(self) -> (mpsc::UnboundedReceiver<Packet>, InterfaceSink) {
+        let sink = InterfaceSink {
+            id: self.id,
+            router_tx: self.router_tx,
+        };
+        (self.outbound, sink)
+    }
+}
+
+/// Delivers packets received on an [`Interface`] into the endpoint's router,
+/// tagged with the interface they arrived on.
+#[derive(Clone)]
+pub struct InterfaceSink {
+    id: InterfaceId,
+    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
+}
+
+impl InterfaceSink {
+    /// Deliver a received packet into the router. Returns `false` if the endpoint
+    /// has been dropped.
+    pub fn deliver(&self, pkt: Packet) -> bool {
+        self.router_tx.send((self.id, pkt)).is_ok()
+    }
+}
+
 /// An attached interface: the channel its writer task drains.
 struct Iface {
     id: InterfaceId,
@@ -311,6 +374,26 @@ impl Endpoint {
     /// Attach a connected TCP stream as an interface, and return its id.
     pub fn attach_stream(&self, stream: TcpStream) -> InterfaceId {
         attach(&self.shared, stream)
+    }
+
+    /// Attach a raw packet [`Interface`] and return its handle, doing no I/O or
+    /// framing. The caller drives the transport: drain [`Interface::next_outbound`]
+    /// to send packets, and call the [`InterfaceSink`] to deliver received ones.
+    /// This is the seam a non-TCP medium (serial, or a deterministic test loss
+    /// oracle) plugs into; `attach_tcp_client` / `listen_tcp` are this plus framing.
+    pub fn attach_interface(&self) -> Interface {
+        let id = self.shared.next_iface_id.fetch_add(1, Ordering::Relaxed);
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<Packet>();
+        self.shared
+            .interfaces
+            .lock()
+            .unwrap()
+            .push(Iface { id, outbound: out_tx });
+        Interface {
+            id,
+            outbound: out_rx,
+            router_tx: self.shared.router_tx.clone(),
+        }
     }
 
     /// Dial a TCP peer and attach it as an interface.

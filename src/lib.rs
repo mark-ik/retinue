@@ -32,6 +32,9 @@ pub mod announce;
 pub mod destination;
 #[cfg(feature = "tokio")]
 pub mod endpoint;
+/// A deterministic packet loss/delay oracle for testing reliability without radio.
+#[cfg(feature = "tokio")]
+pub mod lossy;
 pub mod hash;
 pub mod identity;
 pub mod iface;
