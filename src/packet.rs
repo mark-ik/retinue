@@ -208,13 +208,24 @@ impl Packet {
     /// Note the transport address of a header-type-2 packet is deliberately excluded, the
     /// same way RNS excludes it, so the hash is stable across a transport hop.
     pub fn hash(&self) -> AddressHash {
+        AddressHash::from_bytes(
+            self.full_hash()[..ADDRESS_HASH_LEN].try_into().expect("32 >= 16"),
+        )
+    }
+
+    /// The full 32-byte SHA-256 packet hash: `SHA256(masked_flags || destination ||
+    /// context || payload)`. [`hash`](Self::hash) is its 16-byte truncation. A link data
+    /// **proof** carries this full hash to identify the packet it acknowledges (see
+    /// [`crate::link::Link::data_proof`]); the truncation alone is what RNS calls the
+    /// packet's truncated hash. Verified against RNS 1.3.8.
+    pub fn full_hash(&self) -> [u8; 32] {
         let flags = self.encode()[0] & 0x0F;
         let mut buf = Vec::with_capacity(1 + ADDRESS_HASH_LEN + 1 + self.payload.len());
         buf.push(flags);
         buf.extend_from_slice(self.destination.as_slice());
         buf.push(self.context);
         buf.extend_from_slice(&self.payload);
-        AddressHash::of(&buf)
+        crate::hash::full_hash(&buf)
     }
 
     /// The encoded length of this packet on the wire.

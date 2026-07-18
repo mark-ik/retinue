@@ -1,0 +1,25 @@
+{
+  "description": "RNS 1.3.8 link-data PROOF, captured authoritatively: we sent RNS a proof-requesting channel packet and RNS proved it. Each proof frame is decoded; signature_validates_as names the (key, message) pair whose verification passed, which is the wire-truth of how a link data proof is signed.",
+  "rns_version": "1.3.8",
+  "link_id_hex": "884427832578c7b9f18142069008daae",
+  "our_sent_packet_hash_full_hex": "5bbe59a29de2b62b9c90a4e7a9190c0d8ca9d2c26a32e62205327d0c577be137",
+  "our_sent_packet_hash_trunc_hex": "5bbe59a29de2b62b9c90a4e7a9190c0d",
+  "rns_identity_ed25519_pub_hex": "84f6da8c37b5f343568b185a20c63b5bf011a3d60ee805bb9e151371ea1d5555",
+  "prover_identity_public_hex": "a8fd56cbca13577c24914cc4c13308b7d7f3e20bd39c55a4e636984655be343884f6da8c37b5f343568b185a20c63b5bf011a3d60ee805bb9e151371ea1d5555",
+  "prover_identity_secret_seed_hex": "f0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6cf0ecbba49e783dee14ffc6c9f1e1251efa7d7629e0fa32413c5c59ec2e0f6d6c",
+  "proof_frames_seen": 1,
+  "proofs": [
+    {
+      "frame_hex": "0f00884427832578c7b9f18142069008daae005bbe59a29de2b62b9c90a4e7a9190c0d8ca9d2c26a32e62205327d0c577be137cd4e640244d2d74d0567cd20c3e454edfd5e48e485c4cee649311fc04060caec81debcc21c84ec773692489916408b65a9c7d2f972f7e8adc538174505df0b0b",
+      "flags": 15,
+      "dest_field_hex": "884427832578c7b9f18142069008daae",
+      "dest_is_trunc_hash": false,
+      "dest_is_link_id": true,
+      "context": 0,
+      "payload_len": 96,
+      "explicit_hash_hex": "5bbe59a29de2b62b9c90a4e7a9190c0d8ca9d2c26a32e62205327d0c577be137",
+      "explicit_hash_matches": true,
+      "signature_validates_as": "rns_identity_ed25519 over full_hash"
+    }
+  ]
+}

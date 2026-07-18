@@ -1212,6 +1212,40 @@ sets `compressed` on send; a compressed frame received from RNS is surfaced
 (`had_unsupported_frame`) rather than spliced in as garbage, pending a bz2 receive pass (the one
 remaining interop gap, narrow because bz2 rarely shrinks a sub-423-byte chunk).
 
+### 3.11 Link-data proof — the ack a Channel treats as delivery (captured 2026-07-18)
+
+§3.9 established that a Channel packet is proof-requesting and that the *ack is the link packet
+proof* — but not the proof's bytes. Captured authoritatively via `oracle/capture_rns_proof.py`
+(fixture `rns_link_proof.json`): we sent RNS a proof-requesting Channel packet and read the PROOF
+it emitted, then recovered the format by *which key over which message validates the signature*, so
+nothing is guessed. (A first attempt inferred the format from whether it silenced RNS's
+retransmit; that oracle is confounded by RNS giving up after ~5 resends, so it was discarded.)
+
+- **Packet:** `Proof`-type, `flags = 0x0f` (header-1, destination-type LINK, packet-type PROOF),
+  addressed to the **link id** (not the proven packet's hash), context `0x00`, sent unencrypted.
+- **Payload — explicit, 96 bytes** (`PacketReceipt.EXPL_LENGTH`):
+
+  ```
+  [ full_packet_hash (32) ][ Ed25519 signature (64) ]
+  ```
+
+  The signature is over the **full 32-byte** packet hash (`SHA256(masked_flags || destination ||
+  context || payload)` — retinue's verified formula, un-truncated). Because the proof is addressed
+  to the link, it carries the hash inside to name *which* packet it proves; the sender matches that
+  to an outstanding sequence. The implicit 64-byte form is not used here.
+- **Signing key:** the prover's **identity** Ed25519 key. RNS (owning the destination) signs with
+  its identity; the peer validates against the identity it learned from the announce. Confirmed on
+  the wire: the captured signature verifies as `rns_identity_ed25519 over full_hash`.
+
+**Implication for retinue — done 2026-07-18.** `link::data_proof_packet` / `read_data_proof` (and
+the `Link::data_proof` / `Link::verify_data_proof` wrappers) build and validate this. A gold test
+reproduces RNS's captured proof **byte for byte** — Ed25519 is deterministic, so signing the same
+hash with the same identity yields RNS's exact signature — and validates RNS's own proof back. This
+is the ack primitive the Channel driver rides: prove a received data packet, and match an inbound
+proof's hash to the outstanding sequence it releases. What remains is the driver itself — pumping
+`Channel::poll_transmit` on a clock, emitting a proof per delivered packet, and calling `on_proof`
+when a proof's hash lands — wiring the reliable stream under `endpoint::LinkStream`.
+
 ---
 
 ## 4. Open questions for the oracle

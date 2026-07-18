@@ -383,6 +383,56 @@ pub fn accept(
     ))
 }
 
+/// Bytes of an explicit link-data proof payload: `full_hash(32) || signature(64)`. This is
+/// RNS 1.3.8's `PacketReceipt.EXPL_LENGTH` (96); the implicit 64-byte form is not used for
+/// link data, where the proof must carry the hash to name the packet it acknowledges.
+pub const DATA_PROOF_LEN: usize = 32 + SIGNATURE_LEN;
+
+/// Build the explicit link-data proof packet: a `Proof`-type packet addressed to
+/// `link_id`, context `0x00`, payload `proven_full_hash(32) || Ed25519_sign(prover,
+/// proven_full_hash)(64)`, sent unencrypted. This is RNS 1.3.8's link-data proof exactly
+/// (captured in `rns_link_proof.json`): the ack that concludes a proof-requesting packet.
+/// The proof is addressed to the link, not the packet hash, so it carries the hash inside
+/// to say which packet it proves — the sender matches that to an outstanding sequence.
+pub fn data_proof_packet(
+    link_id: AddressHash,
+    proven_full_hash: &[u8; 32],
+    prover: &PrivateIdentity,
+) -> Packet {
+    let signature = prover.sign(proven_full_hash);
+    let mut payload = Vec::with_capacity(DATA_PROOF_LEN);
+    payload.extend_from_slice(proven_full_hash);
+    payload.extend_from_slice(&signature);
+    Packet {
+        ifac: false,
+        header_type: HeaderType::Type1,
+        context_flag: false,
+        propagation: Propagation::Broadcast,
+        destination_type: DestinationType::Link,
+        packet_type: PacketType::Proof,
+        hops: 0,
+        transport: None,
+        destination: link_id,
+        context: 0x00,
+        payload,
+    }
+}
+
+/// Validate an explicit link-data proof for `link_id` against `peer`'s identity, returning
+/// the proven packet's full 32-byte hash if the proof is well-formed and correctly signed,
+/// else `None`. The inverse of [`data_proof_packet`].
+pub fn read_data_proof(link_id: AddressHash, proof: &Packet, peer: &Identity) -> Option<[u8; 32]> {
+    if proof.packet_type != PacketType::Proof
+        || proof.destination != link_id
+        || proof.payload.len() != DATA_PROOF_LEN
+    {
+        return None;
+    }
+    let full_hash: [u8; 32] = proof.payload[..32].try_into().ok()?;
+    let signature: [u8; SIGNATURE_LEN] = proof.payload[32..].try_into().ok()?;
+    peer.verify(&full_hash, &signature).then_some(full_hash)
+}
+
 /// What an inbound link-layer packet is, once matched to a link by its id.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Inbound {
@@ -493,6 +543,23 @@ impl Link {
             context: CTX_RESOURCE_PRF,
             payload,
         }
+    }
+
+    /// Build a link-data **proof** for a received proof-requesting packet — the ack a
+    /// [`Channel`](crate::channel::Channel) treats as delivery. Signs `proven`'s full
+    /// 32-byte hash with `prover`'s identity and wraps it in the explicit proof
+    /// [`data_proof_packet`] addressed to this link. The peer validates it against the
+    /// identity it knows for us.
+    pub fn data_proof(&self, proven: &Packet, prover: &PrivateIdentity) -> Packet {
+        data_proof_packet(self.id, &proven.full_hash(), prover)
+    }
+
+    /// Validate an inbound link-data proof against `peer`'s identity, returning the full
+    /// hash of the packet it acknowledges (for the sender to match to an outstanding
+    /// sequence), or `None` if it is not a well-formed, correctly-signed proof for this
+    /// link. The inverse of [`data_proof`](Self::data_proof).
+    pub fn verify_data_proof(&self, proof: &Packet, peer: &Identity) -> Option<[u8; 32]> {
+        read_data_proof(self.id, proof, peer)
     }
 
     /// Classify an inbound packet addressed to this link.
@@ -720,5 +787,59 @@ mod tests {
         let mut foreign = link.keepalive_packet(KEEPALIVE_REQUEST);
         foreign.destination = AddressHash::from_bytes([0xAB; 16]);
         assert_eq!(link.receive(&foreign), None);
+    }
+
+    /// Gold test: retinue builds the exact link-data proof RNS 1.3.8 emitted for a packet
+    /// we sent it (captured in `rns_link_proof.json`), and validates RNS's own proof back.
+    /// Ed25519 is deterministic, so signing the same full hash with the same identity
+    /// reproduces RNS's signature byte for byte — this pins the whole proof wire.
+    #[test]
+    fn data_proof_matches_rns_capture() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/rns_link_proof.json")).unwrap();
+        let link_id =
+            AddressHash::from_slice(&hex::decode(doc["link_id_hex"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let full_hash: [u8; 32] =
+            hex::decode(doc["our_sent_packet_hash_full_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let seed: [u8; 64] =
+            hex::decode(doc["prover_identity_secret_seed_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let prover = PrivateIdentity::from_secret_bytes(&seed);
+
+        // Generate: our proof packet is RNS's wire bytes exactly.
+        let proof = data_proof_packet(link_id, &full_hash, &prover);
+        assert_eq!(
+            hex::encode(proof.encode()),
+            doc["proofs"][0]["frame_hex"].as_str().unwrap(),
+            "proof packet must equal RNS's wire bytes",
+        );
+
+        // Validate: retinue accepts RNS's proof against RNS's identity, recovering the hash.
+        let pubbytes: [u8; 64] = hex::decode(doc["prover_identity_public_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let peer = Identity::from_public_bytes(&pubbytes).unwrap();
+        assert_eq!(
+            read_data_proof(link_id, &proof, &peer),
+            Some(full_hash),
+            "validates and recovers the proven hash",
+        );
+
+        // A tampered signature is rejected, and a proof for a different link is not ours.
+        let mut bad = proof.clone();
+        *bad.payload.last_mut().unwrap() ^= 0x01;
+        assert_eq!(read_data_proof(link_id, &bad, &peer), None, "tamper rejected");
+        assert_eq!(
+            read_data_proof(AddressHash::from_bytes([0x00; 16]), &proof, &peer),
+            None,
+            "wrong link rejected",
+        );
     }
 }
