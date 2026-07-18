@@ -188,10 +188,10 @@ mod tests {
             let mut still = Vec::new();
             for (t, pkt) in std::mem::take(&mut to_server) {
                 if t <= now {
-                    if let Some(proof) = server.on_data_packet(&pkt) {
-                        if !bwd.should_drop() {
-                            to_client.push((now + 1 + bwd.delay_ms(), proof));
-                        }
+                    if let Some(proof) = server.on_data_packet(&pkt)
+                        && !bwd.should_drop()
+                    {
+                        to_client.push((now + 1 + bwd.delay_ms(), proof));
                     }
                 } else {
                     still.push((t, pkt));

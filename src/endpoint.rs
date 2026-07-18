@@ -21,6 +21,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -32,8 +33,9 @@ use crate::destination::DestinationName;
 use crate::hash::AddressHash;
 use crate::iface::hdlc::{frame, Deframer};
 use crate::identity::{Identity, PrivateIdentity};
-use crate::link::{self, Inbound, Link, LinkMode, LinkTrailer};
+use crate::link::{self, CTX_CHANNEL, CTX_LINKCLOSE, Inbound, Link, LinkMode, LinkTrailer};
 use crate::packet::{Packet, PacketType};
+use crate::reliable::ReliableChannel;
 use crate::token::IV_LEN;
 
 /// Largest plaintext chunk per link data packet. Kept under `ENCRYPTED_MDU` (383) so the
@@ -42,6 +44,11 @@ const WRITE_CHUNK: usize = crate::packet::ENCRYPTED_MDU - 16;
 
 /// In-memory buffer for a stream's inbound side.
 const DUPLEX_BUF: usize = 64 * 1024;
+
+/// The reliable driver's clock period. It advances a logical tick each period, which drives
+/// retransmission of unproven channel packets (`DEFAULT_RETX_TIMEOUT` ticks). One timer per
+/// active reliable link; a production build would pause it when the link is fully idle.
+const RELIABLE_TICK_MS: u64 = 50;
 
 /// Maximum hops an announce or packet may travel before a transport node drops it. RNS's
 /// default `m` (`PATHFINDER_M`).
@@ -185,11 +192,27 @@ struct Iface {
 
 struct LinkEntry {
     link: Link,
-    inbound: mpsc::UnboundedSender<Vec<u8>>,
+    /// How inbound traffic for this link is handled: best-effort delivers decrypted bytes
+    /// straight to the stream; reliable hands raw channel and proof packets to a driver.
+    kind: LinkKind,
     /// The interface this link's traffic goes out on. Recorded for routing (R7), where a
     /// forwarded link's return traffic must go back the way it came.
     #[allow(dead_code)]
     iface: InterfaceId,
+}
+
+/// The delivery discipline of a link's stream, chosen when the stream is registered.
+enum LinkKind {
+    /// The router decrypts each data packet and forwards the plaintext (right for TCP,
+    /// where the medium never drops).
+    BestEffort {
+        inbound: mpsc::UnboundedSender<Vec<u8>>,
+    },
+    /// The router forwards raw channel-data and proof packets to the reliable driver task,
+    /// which orders them, proves receipts, and drives retransmission (for lossy media).
+    Reliable {
+        packets: mpsc::UnboundedSender<Packet>,
+    },
 }
 
 type Links = Arc<Mutex<HashMap<AddressHash, LinkEntry>>>;
@@ -197,6 +220,19 @@ type Links = Arc<Mutex<HashMap<AddressHash, LinkEntry>>>;
 /// A destination this endpoint accepts links on.
 struct Registered {
     dest: AddressHash,
+    /// Whether links to it are reliable (Channel/Buffer + proofs) or best-effort.
+    reliable: bool,
+}
+
+/// An accepted inbound **reliable** link, handed to [`Endpoint::accept_reliable`] to bind a
+/// [`ReliableChannel`] once the caller supplies the peer identity to validate proofs against.
+struct AcceptedLink {
+    link: Link,
+    iface: InterfaceId,
+    /// The destination the link targeted. Kept for parity with [`Accepted`] and future
+    /// per-destination reliable dispatch; `accept_reliable` does not surface it yet.
+    #[allow(dead_code)]
+    destination: AddressHash,
 }
 
 /// Shared router state.
@@ -211,6 +247,9 @@ struct Shared {
     router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
     /// Inbound accepted links (stream + destination), surfaced to `accept`.
     accepted_tx: mpsc::UnboundedSender<Accepted>,
+    /// Inbound accepted reliable links, surfaced to `accept_reliable` (which binds the
+    /// stream once given the peer identity to validate proofs against).
+    reliable_accepted_tx: mpsc::UnboundedSender<AcceptedLink>,
     /// Validated announces, surfaced to `announcements`.
     announce_tx: mpsc::UnboundedSender<PeerAnnounce>,
     /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake
@@ -320,6 +359,7 @@ impl Shared {
 pub struct Endpoint {
     shared: Arc<Shared>,
     accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<Accepted>>,
+    reliable_accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<AcceptedLink>>,
     announce_rx: AsyncMutex<mpsc::UnboundedReceiver<PeerAnnounce>>,
 }
 
@@ -328,6 +368,7 @@ impl Endpoint {
     pub fn new(identity: PrivateIdentity) -> Self {
         let (router_tx, mut router_rx) = mpsc::unbounded_channel::<(InterfaceId, Packet)>();
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
+        let (reliable_accepted_tx, reliable_accepted_rx) = mpsc::unbounded_channel::<AcceptedLink>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
         let shared = Arc::new(Shared {
@@ -338,6 +379,7 @@ impl Endpoint {
             interfaces: Mutex::new(Vec::new()),
             router_tx,
             accepted_tx,
+            reliable_accepted_tx,
             announce_tx,
             pending: Mutex::new(HashMap::new()),
             pending_links: Mutex::new(HashMap::new()),
@@ -360,6 +402,7 @@ impl Endpoint {
         Self {
             shared,
             accepted_rx: AsyncMutex::new(accepted_rx),
+            reliable_accepted_rx: AsyncMutex::new(reliable_accepted_rx),
             announce_rx: AsyncMutex::new(announce_rx),
         }
     }
@@ -442,14 +485,27 @@ impl Endpoint {
         self.shared.identity.public()
     }
 
-    /// Register a destination to accept links on, and announce it.
+    /// Register a destination to accept best-effort links on, and announce it. Accept these
+    /// with [`accept`](Self::accept).
     pub fn register(&self, name: DestinationName, app_data: &[u8]) {
+        self.register_with(name, app_data, false);
+    }
+
+    /// Register a destination to accept **reliable** links on — the Channel/Buffer path with
+    /// proof acks, for lossy interfaces — and announce it. Accept these with
+    /// [`accept_reliable`](Self::accept_reliable), supplying the peer identity whose proofs
+    /// to validate.
+    pub fn register_reliable(&self, name: DestinationName, app_data: &[u8]) {
+        self.register_with(name, app_data, true);
+    }
+
+    fn register_with(&self, name: DestinationName, app_data: &[u8], reliable: bool) {
         let dest = name.destination_hash(self.shared.identity.public());
         self.shared
             .registered
             .lock()
             .unwrap()
-            .push(Registered { dest });
+            .push(Registered { dest, reliable });
         self.announce(&name, app_data);
     }
 
@@ -475,9 +531,25 @@ impl Endpoint {
             .map(|p| p.identity)
     }
 
-    /// Open a link to a destination and return its stream. `peer` is the destination's
-    /// identity (learned from an announce, e.g. via [`resolve`](Self::resolve)).
+    /// Open a best-effort link to a destination and return its stream. `peer` is the
+    /// destination's identity (learned from an announce, e.g. via [`resolve`](Self::resolve)).
     pub async fn open(&self, dest: AddressHash, peer: Identity) -> io::Result<LinkStream> {
+        let (link, iface) = self.establish(dest, peer).await?;
+        Ok(register_stream(&self.shared, link, iface))
+    }
+
+    /// Open a **reliable** link to a destination — the Channel/Buffer path with proof acks,
+    /// for lossy interfaces — and return its stream. `peer` is the destination's identity:
+    /// the handshake authenticates it, and the peer's proofs of our packets are validated
+    /// against it.
+    pub async fn open_reliable(&self, dest: AddressHash, peer: Identity) -> io::Result<LinkStream> {
+        let (link, iface) = self.establish(dest, peer).await?;
+        Ok(register_reliable_stream(&self.shared, link, iface, peer))
+    }
+
+    /// Establish a link to `dest` (whose identity is `peer`), returning it with the interface
+    /// its proof arrived on. The stream discipline is chosen by the caller.
+    async fn establish(&self, dest: AddressHash, peer: Identity) -> io::Result<(Link, InterfaceId)> {
         let ephemeral = ephemeral_seed(&self.shared);
         let (pending, request) = link::PendingLink::open(
             dest,
@@ -502,10 +574,8 @@ impl Endpoint {
             None => self.shared.broadcast(request),
         }
 
-        let (link, iface) = rx
-            .await
-            .map_err(|_| io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped"))?;
-        Ok(register_stream(&self.shared, link, iface))
+        rx.await
+            .map_err(|_| io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped"))
     }
 
     /// Wait for the next inbound link, surfaced as a stream.
@@ -522,6 +592,24 @@ impl Endpoint {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
+    }
+
+    /// Wait for the next inbound **reliable** link (to a destination registered with
+    /// [`register_reliable`](Self::register_reliable)) and bind its stream. `peer` is the
+    /// initiator's identity, whose proofs of our sent packets this side validates against.
+    ///
+    /// The initiator's identity is not yet carried on the link (an `identify` step is a
+    /// follow-on), so the caller supplies the expected `peer` here — a retinue peer whose
+    /// identity is known out of band, or from its announce.
+    pub async fn accept_reliable(&self, peer: Identity) -> io::Result<LinkStream> {
+        let accepted = self
+            .reliable_accepted_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))?;
+        Ok(register_reliable_stream(&self.shared, accepted.link, accepted.iface, peer))
     }
 
     /// The next validated announce, for building a host peer-id to destination map.
@@ -631,8 +719,14 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         }
         PacketType::LinkRequest => {
             let dest = pkt.destination;
-            let is_ours = shared.registered.lock().unwrap().iter().any(|r| r.dest == dest);
-            if is_ours {
+            let reliable = shared
+                .registered
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.dest == dest)
+                .map(|r| r.reliable);
+            if let Some(reliable) = reliable {
                 let ephemeral = ephemeral_seed(shared);
                 if let Ok((link, proof)) = link::accept(
                     &pkt,
@@ -641,30 +735,60 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                     LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: crate::packet::MTU as u32 },
                 ) {
                     shared.send_on(iface, proof);
-                    let stream = register_stream(shared, link, iface);
-                    let _ = shared.accepted_tx.send(Accepted { stream, destination: dest });
+                    if reliable {
+                        // Defer the stream: accept_reliable binds it once given the peer
+                        // identity to validate proofs against.
+                        let _ = shared
+                            .reliable_accepted_tx
+                            .send(AcceptedLink { link, iface, destination: dest });
+                    } else {
+                        let stream = register_stream(shared, link, iface);
+                        let _ = shared.accepted_tx.send(Accepted { stream, destination: dest });
+                    }
                 }
             }
         }
         PacketType::Proof => {
             // Complete a pending outbound link, binding it to the interface it came in on.
             let maybe = shared.pending_links.lock().unwrap().remove(&pkt.destination);
-            if let Some(pending) = maybe
-                && let Ok(link) = pending.prove(&pkt)
-                && let Some(tx) = shared.pending.lock().unwrap().remove(&pkt.destination)
-            {
-                let _ = tx.send((link, iface));
+            if let Some(pending) = maybe {
+                if let Ok(link) = pending.prove(&pkt)
+                    && let Some(tx) = shared.pending.lock().unwrap().remove(&pkt.destination)
+                {
+                    let _ = tx.send((link, iface));
+                }
+            } else {
+                // Otherwise a link-data proof for an established link: hand it to the
+                // reliable driver, which matches its hash to an outstanding sequence.
+                // Best-effort links never request proofs, so there is nothing to do.
+                let packets = shared.links.lock().unwrap().get(&pkt.destination).and_then(|e| {
+                    match &e.kind {
+                        LinkKind::Reliable { packets } => Some(packets.clone()),
+                        LinkKind::BestEffort { .. } => None,
+                    }
+                });
+                if let Some(packets) = packets {
+                    let _ = packets.send(pkt);
+                }
             }
         }
         PacketType::Data => {
-            // Link data: route to the matching stream.
-            let entry_inbound = shared
-                .links
-                .lock()
-                .unwrap()
-                .get(&pkt.destination)
-                .map(|e| (e.link.clone(), e.inbound.clone()));
-            if let Some((link, inbound)) = entry_inbound {
+            // Link data: route to the matching stream by its delivery discipline. Clone the
+            // sender(s) under the lock, then act on the packet once the lock is released.
+            let (reliable, best) = {
+                let links = shared.links.lock().unwrap();
+                match links.get(&pkt.destination) {
+                    Some(e) => match &e.kind {
+                        LinkKind::Reliable { packets } => (Some(packets.clone()), None),
+                        LinkKind::BestEffort { inbound } => (None, Some((e.link.clone(), inbound.clone()))),
+                    },
+                    None => (None, None),
+                }
+            };
+            if let Some(packets) = reliable {
+                // The reliable driver owns decryption, ordering, and proving; hand it raw.
+                let _ = packets.send(pkt);
+            } else if let Some((link, inbound)) = best {
                 match link.receive(&pkt) {
                     Some(Inbound::Data(bytes)) => {
                         let _ = inbound.send(bytes);
@@ -727,7 +851,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
 
     shared.links.lock().unwrap().insert(
         link_id,
-        LinkEntry { link: link.clone(), inbound: inbound_tx, iface },
+        LinkEntry { link: link.clone(), kind: LinkKind::BestEffort { inbound: inbound_tx }, iface },
     );
 
     // Inbound: decrypted data from the router → the stream's read side.
@@ -764,6 +888,99 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
                 }
             }
         }
+    });
+
+    LinkStream { inner: mine, link_id }
+}
+
+/// Build a **reliable** [`LinkStream`] for a live link: the RNS Channel/Buffer path with
+/// link-proof acks (see [`crate::reliable`]). A single driver task owns the
+/// [`ReliableChannel`] and pumps it — app writes in, ordered bytes out, a proof per
+/// delivered packet, an inbound proof releasing its sequence, and retransmits on a clock —
+/// so the stream stays honest over a lossy interface. `peer` is the identity whose proofs
+/// this side validates (the destination's identity, for an initiator).
+fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId, peer: Identity) -> LinkStream {
+    let (mine, theirs) = tokio::io::duplex(DUPLEX_BUF);
+    let (mut read_half, mut write_half) = tokio::io::split(theirs);
+    let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel::<Packet>();
+    let link_id = link.id();
+
+    shared.links.lock().unwrap().insert(
+        link_id,
+        LinkEntry { link: link.clone(), kind: LinkKind::Reliable { packets: pkt_tx }, iface },
+    );
+
+    let close_link = link.clone();
+    let mut rc = ReliableChannel::new(link, shared.identity.clone(), peer);
+    let drv = Arc::clone(shared);
+    tokio::spawn(async move {
+        let mut buf = [0u8; WRITE_CHUNK];
+        let mut clock: u64 = 0;
+        let mut writer_open = true; // the app's write side is still open
+        let mut peer_done = false; // the peer signalled end-of-stream (its eof frame)
+        let mut interval = tokio::time::interval(Duration::from_millis(RELIABLE_TICK_MS));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                // Raw inbound packets from the router: channel data (prove + deliver), an
+                // ack (release its sequence), or the peer's link close.
+                maybe = pkt_rx.recv() => {
+                    let Some(pkt) = maybe else { break }; // router dropped the link
+                    if pkt.packet_type == PacketType::Proof {
+                        rc.on_proof(&pkt, clock);
+                    } else if pkt.context == CTX_CHANNEL {
+                        if let Some(proof) = rc.on_data_packet(&pkt) {
+                            drv.send_on(iface, proof);
+                        }
+                        let bytes = rc.read();
+                        if !bytes.is_empty() && write_half.write_all(&bytes).await.is_err() {
+                            break;
+                        }
+                        if rc.recv_finished() {
+                            // The peer's stream ended: close our read side so the app's
+                            // reader sees EOF. We keep running to finish our own sending.
+                            let _ = write_half.shutdown().await;
+                            peer_done = true;
+                        }
+                    } else if pkt.context == CTX_LINKCLOSE {
+                        let _ = write_half.shutdown().await;
+                        break;
+                    }
+                }
+                // App writes -> the reliable send queue. Disabled once the writer closes, so
+                // we do not spin on end-of-stream.
+                res = read_half.read(&mut buf), if writer_open => {
+                    match res {
+                        Ok(0) | Err(_) => {
+                            rc.finish(); // queue the eof frame
+                            writer_open = false;
+                        }
+                        Ok(n) => rc.write(&buf[..n]),
+                    }
+                }
+                // The retransmit clock.
+                _ = interval.tick() => {
+                    clock += 1;
+                }
+            }
+
+            // After any event, put ready channel packets on the wire: new data within the
+            // window, plus retransmits past their timeout.
+            for pkt in rc.poll_transmit(clock, || next_iv(&drv)) {
+                drv.send_on(iface, pkt);
+            }
+
+            // The stream is fully done only when our side finished sending (write closed and
+            // everything, including our eof frame, sent and proven) AND the peer finished
+            // sending (its eof arrived). This preserves half-close: after our write closes we
+            // keep delivering the peer's reply until it, too, ends. Then close the link.
+            if !writer_open && peer_done && rc.send_idle() {
+                drv.send_on(iface, close_link.close_packet());
+                break;
+            }
+        }
+        drv.links.lock().unwrap().remove(&link_id);
     });
 
     LinkStream { inner: mine, link_id }
