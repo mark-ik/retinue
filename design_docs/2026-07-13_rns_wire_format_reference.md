@@ -1133,6 +1133,47 @@ random; requests or responses larger than the link MDU degrade into Resources (t
 under which `RequestReceipt.get_progress()` and `register_request_handler(auto_compress=...)`
 make sense); `ALLOW_LIST` gates on the identity revealed by `LinkIdentify` (0xFB).
 
+### 3.9 Channel — reliable, sequenced link messaging (captured 2026-07-17)
+
+The layer beneath `Buffer` (RNS's reliable byte stream). Captured black-box via
+`oracle/capture_channel.py`; fixture `tests/fixtures/channel_wire.json`. `Envelope.pack()`
+is pure over `(msgtype, sequence, payload)`, so the envelope layout is read directly from its
+output; the constants are public class attributes; the packet context is `RNS.Packet.CHANNEL`.
+
+- **Packet context:** `CHANNEL = 14` (`0x0e`). A Channel message is an ordinary link data
+  packet (`0x0c 0x00 | link_id | 0x0e | token(envelope)`), same encryption as any link data —
+  the token wraps the plaintext envelope below.
+- **Envelope layout** (plaintext, big-endian):
+
+  ```
+  [ msgtype u16 ][ sequence u16 ][ length u16 ][ payload (length bytes) ]
+  ```
+
+  Verified vectors (RNS's own `pack()`): `seq=7,msgtype=0xABCD,"hello"` →
+  `abcd 0007 0005 68656c6c6f`; `seq=0,""` → `abcd 0000 0000`; `seq=65535,"AB"` →
+  `abcd ffff 0002 4142`. `msgtype` identifies the registered message class; `length` is the
+  packed-message length, redundant with the packet length but present.
+- **Sequence:** windowed 16-bit, `SEQ_MODULUS = 65536`, `SEQ_MAX = 65535`. Window comparisons
+  wrap — retinue's current `channel` uses a monotonic u32 and must move to wrapping u16 for
+  wire-compat.
+- **Dynamic window (the R4 "dynamic window sizing" deferral, spec'd by constants):** starts at
+  `WINDOW = 2`, grows toward an RTT-tiered max — `WINDOW_MAX_SLOW/MEDIUM/FAST = 5/12/48` at RTT
+  thresholds `RTT_SLOW/MEDIUM/FAST = 1.45/0.75/0.18 s`, with `WINDOW_MIN_LIMIT_*` floors
+  (2/5/16) and `WINDOW_FLEXIBILITY = 4`; `FAST_RATE_THRESHOLD = 10` consecutive successes to
+  step up. `WINDOW_MIN = 2`, `WINDOW_MAX = 48`.
+- **Acknowledgement — OPEN (O-18, ack/retry half).** No ack envelope was observed; RNS Channel almost
+  certainly reuses the **link packet proof** as the per-sequence ack (each envelope packet is
+  proof-requesting; unproven sequences retransmit). This differs from retinue's current
+  explicit `Frame::Ack` and must be confirmed by a link-level capture before the wire is pinned.
+  The *machinery* (sequencing, window, retransmit, reorder-buffer) is unchanged; only the ack
+  signal moves from an explicit frame to the link proof.
+
+**Implication for retinue.** The `channel` module built 2026-07-17 has the right machinery,
+tested against the loss oracle, but its own wire. To become RNS-Channel-compatible: (1) swap the
+envelope to the layout above under context 14; (2) move seq to wrapping u16; (3) replace explicit
+acks with link-proof acks (pending O-18's ack half); (4) adopt the dynamic window. The reliability tests
+carry over unchanged — only the codec + ack-source swap.
+
 ---
 
 ## 4. Open questions for the oracle
@@ -1160,7 +1201,7 @@ Ranked by blast radius: how badly a wrong guess hurts, and how silently.
 | **O-15** | **Path response.** Is an announce delivered as a path response distinguished by context byte 0x0B? Issue a path request (destination `rnstransport.path.request`, 51-byte packet = 19 + 32) and dump the context byte of what comes back. Also confirms the real Plain destination hash (expected `6b9f66014d9853faab220fba47d02761`) and the type-2 address order in one experiment. | Cannot distinguish solicited from spontaneous announces. Cheap; settles three questions at once. |
 | **O-16** | **Link close (0xFC) and identify (0xFB) payloads.** Both are dead constants in the crate; `Link::close()` sends nothing. Encrypted or plaintext? What plaintext? | Blocks R3's teardown and R4's `ALLOW_LIST`. |
 | **O-17** | **Resource wire format, in full.** Advertisement, part, part request, hashmap update, proof, cancel: serialization format, field order, integer widths, flags, hashmap encoding, windowing model, segmentation ceiling, compression algorithm. | **Blocks all of R4.** Nothing is known below the context codes. |
-| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** Sequence-number width, message-type tag, ack/retry scheme, `stream_id` encoding, EOF marker. | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
+| **O-18** | **Channel envelope (0x0E) and Buffer stream framing.** ~~Sequence-number width, message-type tag~~, ack/retry scheme, `stream_id` encoding, EOF marker. **PARTIALLY ANSWERED 2026-07-17** (§3.9, fixture `channel_wire.json`): envelope = `[msgtype u16][seq u16][len u16][payload]` under context 14; seq windowed 16-bit; dynamic window constants captured. **Remaining:** the ack/retry scheme (a link-level capture — confirm RNS uses the link packet *proof* as the per-sequence ack, not an ack envelope) and Buffer's `stream_id`/EOF framing. | Blocks the `AsyncRead`/`AsyncWrite` surface, which 3.6.3 argues should be a Channel port. |
 | **O-19** | **Multi-aspect edge cases.** Zero aspects (is the trailing `.` omitted?), an empty-string aspect, a non-ASCII aspect. Beechat takes aspects as a single pre-dotted string and never exercises the join. | Wrong destination hashes for a class of names. Cheap. |
 | **O-20** | **Random hash structure.** Are the 10 bytes pure randomness, or is part a timestamp? Capture several announces from one destination seconds apart and look for monotonic structure. | Signature interop is unaffected (the field is opaque to a verifier). Only affects de-dup and freshness. Low. |
 | **O-21** | **MDU enforcement on receive.** Does RNS drop an over-MDU packet on ingress, or only refuse to emit one? Is the ceiling 464 or 465? | Determines how strict our decoder should be. Low. |

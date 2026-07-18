@@ -1,0 +1,50 @@
+{
+  "description": "RNS 1.3.8 Channel wire, observed black-box. The envelope is [msgtype u16 BE][sequence u16 BE][length u16 BE][payload], carried in a link data packet with context CHANNEL (14). Sequence is windowed 16-bit. packed_hex is RNS's own Envelope.pack() output; a Rust test reproduces it.",
+  "rns_version": "1.3.8",
+  "packet_context_channel": 14,
+  "envelope_layout": "msgtype:u16be | sequence:u16be | length:u16be | payload",
+  "constants": {
+    "SEQ_MAX": 65535,
+    "SEQ_MODULUS": 65536,
+    "WINDOW": 2,
+    "WINDOW_MIN": 2,
+    "WINDOW_MAX": 48,
+    "WINDOW_FLEXIBILITY": 4,
+    "WINDOW_MAX_SLOW": 5,
+    "WINDOW_MAX_MEDIUM": 12,
+    "WINDOW_MAX_FAST": 48,
+    "WINDOW_MIN_LIMIT_SLOW": 2,
+    "WINDOW_MIN_LIMIT_MEDIUM": 5,
+    "WINDOW_MIN_LIMIT_FAST": 16,
+    "RTT_SLOW": 1.45,
+    "RTT_MEDIUM": 0.75,
+    "RTT_FAST": 0.18,
+    "FAST_RATE_THRESHOLD": 10
+  },
+  "envelope_vectors": [
+    {
+      "sequence": 7,
+      "msgtype": 43981,
+      "payload_hex": "68656c6c6f",
+      "packed_hex": "abcd0007000568656c6c6f"
+    },
+    {
+      "sequence": 0,
+      "msgtype": 43981,
+      "payload_hex": "",
+      "packed_hex": "abcd00000000"
+    },
+    {
+      "sequence": 65535,
+      "msgtype": 43981,
+      "payload_hex": "4142",
+      "packed_hex": "abcdffff00024142"
+    },
+    {
+      "sequence": 258,
+      "msgtype": 43981,
+      "payload_hex": "000102030405060708090a0b0c0d0e0f10111213",
+      "packed_hex": "abcd01020014000102030405060708090a0b0c0d0e0f10111213"
+    }
+  ]
+}
