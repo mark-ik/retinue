@@ -33,9 +33,12 @@
 //! # }
 //! ```
 
+#[cfg(feature = "tokio")]
 use std::time::Duration;
 
+#[cfg(feature = "tokio")]
 use crate::endpoint::{Endpoint, InterfaceSink};
+#[cfg(feature = "tokio")]
 use crate::packet::Packet;
 
 /// A seeded, deterministic loss model: a probability of dropping each packet and a
@@ -87,16 +90,26 @@ impl LossModel {
         x
     }
 
-    fn drops(&mut self) -> bool {
+    /// Whether the next packet is dropped. Advances the model. Exposed so a sans-io
+    /// reliability test (virtual clock) can drive the same seeded decisions the
+    /// async pump uses.
+    pub fn should_drop(&mut self) -> bool {
         self.drop_per_mille != 0 && (self.next() % 1000) < u64::from(self.drop_per_mille)
     }
 
-    fn delay(&mut self) -> Duration {
+    /// The next delivery delay in milliseconds (0..=max). Advances the model. A
+    /// sans-io test reads this as a tick count.
+    pub fn delay_ms(&mut self) -> u64 {
         if self.max_delay_ms == 0 {
-            Duration::ZERO
+            0
         } else {
-            Duration::from_millis(self.next() % (self.max_delay_ms + 1))
+            self.next() % (self.max_delay_ms + 1)
         }
+    }
+
+    #[cfg(feature = "tokio")]
+    fn delay(&mut self) -> Duration {
+        Duration::from_millis(self.delay_ms())
     }
 }
 
@@ -113,6 +126,7 @@ fn splitmix64(seed: u64) -> u64 {
 /// Connect two endpoints through a deterministic lossy link, one [`LossModel`] per
 /// direction. Returns immediately; two pump tasks run in the background until either
 /// endpoint is dropped.
+#[cfg(feature = "tokio")]
 pub fn connect(a: &Endpoint, b: &Endpoint, a_to_b: LossModel, b_to_a: LossModel) {
     let (a_out, a_sink) = a.attach_interface().split();
     let (b_out, b_sink) = b.attach_interface().split();
@@ -122,13 +136,14 @@ pub fn connect(a: &Endpoint, b: &Endpoint, a_to_b: LossModel, b_to_a: LossModel)
 
 /// Move packets from one endpoint's outbound stream to the other's sink, applying
 /// the loss model: some are dropped, survivors delivered after a bounded delay.
+#[cfg(feature = "tokio")]
 async fn pump(
     mut out: tokio::sync::mpsc::UnboundedReceiver<Packet>,
     sink: InterfaceSink,
     mut model: LossModel,
 ) {
     while let Some(pkt) = out.recv().await {
-        if model.drops() {
+        if model.should_drop() {
             continue;
         }
         let delay = model.delay();
@@ -148,7 +163,7 @@ async fn pump(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio"))]
 mod tests {
     use std::time::Duration;
 
@@ -206,13 +221,19 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn drop_model_is_deterministic() {
-        // Same seed + same packet count => identical drop decisions. This is what
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::LossModel;
+
+    #[test]
+    fn drop_model_is_deterministic() {
+        // Same seed + same draw count => identical drop decisions. This is what
         // makes a reliability-layer failure reproduce exactly.
         let run = |seed: u64| {
             let mut m = LossModel::new(seed).drop_per_mille(500);
-            (0..64).map(|_| m.drops()).collect::<Vec<_>>()
+            (0..64).map(|_| m.should_drop()).collect::<Vec<_>>()
         };
         assert_eq!(run(42), run(42), "same seed is reproducible");
         assert_ne!(run(42), run(43), "different seeds diverge");

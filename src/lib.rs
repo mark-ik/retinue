@@ -32,8 +32,10 @@ pub mod announce;
 pub mod destination;
 #[cfg(feature = "tokio")]
 pub mod endpoint;
+/// A reliable, in-order message layer over a link (sequencing, acks, retransmit).
+pub mod channel;
 /// A deterministic packet loss/delay oracle for testing reliability without radio.
-#[cfg(feature = "tokio")]
+/// The [`LossModel`](lossy::LossModel) is pure; `connect`/pumping needs the tokio shell.
 pub mod lossy;
 pub mod hash;
 pub mod identity;
