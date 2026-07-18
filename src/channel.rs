@@ -251,9 +251,92 @@ impl Channel {
     }
 }
 
+/// Default per-message chunk: sized to sit inside a link data packet (`MDU` 464,
+/// less channel framing and link encryption overhead) with margin.
+pub const DEFAULT_CHUNK: usize = 384;
+
+/// A byte stream over a reliable [`Channel`]: [`write`](Self::write) chunks bytes
+/// into channel messages, [`read`](Self::read) concatenates delivered messages in
+/// order. This is the stream-shaped, reliable face of `Channel` — the piece an
+/// `AsyncRead + AsyncWrite` link binds to once a driver pumps
+/// [`poll_transmit`](Self::poll_transmit) / [`handle`](Self::handle) against the
+/// wire. Sans-io like `Channel`; it adds only the byte<->message boundary.
+pub struct Buffer {
+    channel: Channel,
+    max_chunk: usize,
+    read_buf: VecDeque<u8>,
+}
+
+impl Default for Buffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Buffer {
+    /// A buffer with the default window, timeout, and chunk size.
+    pub fn new() -> Self {
+        Self::with_channel(Channel::new(), DEFAULT_CHUNK)
+    }
+
+    /// A buffer over an explicit channel and chunk size.
+    pub fn with_channel(channel: Channel, max_chunk: usize) -> Self {
+        Self {
+            channel,
+            max_chunk: max_chunk.max(1),
+            read_buf: VecDeque::new(),
+        }
+    }
+
+    /// Queue bytes for reliable, in-order delivery, chunked into channel messages.
+    pub fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(self.max_chunk) {
+            self.channel.send(chunk.to_vec());
+        }
+    }
+
+    /// Copy up to `out.len()` delivered bytes into `out`, returning the count read.
+    pub fn read(&mut self, out: &mut [u8]) -> usize {
+        self.fill();
+        let n = out.len().min(self.read_buf.len());
+        for slot in out.iter_mut().take(n) {
+            *slot = self.read_buf.pop_front().expect("len checked");
+        }
+        n
+    }
+
+    /// Take all currently-available delivered bytes.
+    pub fn read_available(&mut self) -> Vec<u8> {
+        self.fill();
+        self.read_buf.drain(..).collect()
+    }
+
+    /// Drain any newly-delivered channel messages into the byte read buffer.
+    fn fill(&mut self) {
+        while let Some(msg) = self.channel.recv() {
+            self.read_buf.extend(msg);
+        }
+    }
+
+    /// Frames to put on the wire now — see [`Channel::poll_transmit`].
+    pub fn poll_transmit(&mut self, now: u64) -> Vec<Frame> {
+        self.channel.poll_transmit(now)
+    }
+
+    /// Feed a received frame in — see [`Channel::handle`].
+    pub fn handle(&mut self, frame: Frame) {
+        self.channel.handle(frame);
+    }
+
+    /// Whether everything written has been sent and acknowledged.
+    pub fn send_idle(&self) -> bool {
+        self.channel.send_idle()
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Channel, Frame};
+    use super::{Buffer, Channel, Frame};
     use crate::lossy::LossModel;
 
     #[test]
@@ -373,5 +456,58 @@ mod tests {
     fn heavy_loss_still_converges() {
         // 60% loss is brutal but retransmission is unconditional, so it still lands.
         stream_over_loss(600, 3, 7);
+    }
+
+    #[test]
+    fn buffer_byte_stream_survives_loss() {
+        // The stream-shaped face: write a blob into one Buffer, read it whole out of
+        // the other across a lossy pipe. Exercises the byte<->message boundary on top
+        // of the reliability the channel tests already prove.
+        let blob: Vec<u8> = (0..5000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+            .collect();
+        let mut tx = Buffer::new();
+        let mut rx = Buffer::new();
+        tx.write(&blob);
+
+        let mut fwd = LossModel::new(3).drop_per_mille(200).max_delay_ms(5);
+        let mut bwd = LossModel::new(4).drop_per_mille(200).max_delay_ms(5);
+        let mut to_rx: Vec<(u64, Frame)> = Vec::new();
+        let mut to_tx: Vec<(u64, Frame)> = Vec::new();
+        let mut got: Vec<u8> = Vec::new();
+
+        for now in 0..1_000_000u64 {
+            for f in tx.poll_transmit(now) {
+                if !fwd.should_drop() {
+                    to_rx.push((now + 1 + fwd.delay_ms(), f));
+                }
+            }
+            for f in rx.poll_transmit(now) {
+                if !bwd.should_drop() {
+                    to_tx.push((now + 1 + bwd.delay_ms(), f));
+                }
+            }
+            to_rx.retain(|(t, f)| {
+                if *t <= now {
+                    rx.handle(f.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            to_tx.retain(|(t, f)| {
+                if *t <= now {
+                    tx.handle(f.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            got.extend(rx.read_available());
+            if got.len() == blob.len() && tx.send_idle() {
+                break;
+            }
+        }
+        assert_eq!(got, blob, "byte stream reconstructs exactly over loss");
     }
 }
