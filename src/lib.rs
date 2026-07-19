@@ -1,22 +1,31 @@
 //! retinue — an endpoint-scoped implementation of the
 //! [Reticulum](https://reticulum.network/) protocol.
 //!
-//! A retinue is the company that travels with a person. This crate aims to be that for a
-//! peer: the identity, announce, link, and resource layers a node needs to *be* a
-//! Reticulum endpoint, embedded as a library. Transport-node routing is a non-goal.
+//! A retinue is the company that travels with a person. This crate is that for a peer: the
+//! identity, announce, link, resource, and reliable-stream layers a node needs to *be* a
+//! Reticulum endpoint, embedded as a library, wire-compatible with RNS 1.3.x.
 //!
 //! # Status
 //!
-//! **R0, the wire vocabulary**: identities, hashes, destination naming, the packet codec,
-//! announces, and the encrypted token. No I/O, no runtime, no RNG. Everything is a pure
-//! function over bytes, which is what lets it be replayed against fixtures captured from
-//! the reference implementation.
+//! The wire vocabulary, links, resources, request/response, the endpoint runtime, opt-in
+//! transport-node routing, and reliable streaming are all implemented and checked
+//! byte-for-byte against RNS 1.3.8 (run as a black-box oracle; see *Provenance*). The
+//! layering:
 //!
-//! **R1, the TCP interface**: HDLC framing ([`iface::hdlc`], also sans-io) and a tokio
-//! shell over it ([`iface::tcp`]). The shell is behind the `tokio` feature, on by default;
-//! turn it off and the codec still stands alone.
+//! - **Sans-io core** — always available, no runtime or RNG: the packet codec
+//!   ([`packet`]), identities ([`identity`]), announces ([`announce`]), the token
+//!   ([`token`]), HDLC framing ([`iface::hdlc`]), links ([`link`]), resources
+//!   ([`resource`]), and the `Channel`/`Buffer` + link-proof reliability machinery
+//!   ([`channel`], [`reliable`]). Pure functions over bytes, replayable against fixtures.
+//! - **The tokio shell** — behind the `tokio` feature (on by default): the TCP interface
+//!   ([`iface::tcp`]) and the [`endpoint`] runtime that attaches interfaces, routes packets,
+//!   and opens/accepts links as streams. Turn the feature off and the sans-io core stands
+//!   alone.
 //!
-//! Links and resources (R3, R4) will sit on top.
+//! Transport-node routing is opt-in ([`endpoint::Endpoint::enable_routing`]); the default
+//! posture is endpoint-scoped. Not yet done: on-air interfaces (serial/RNode/UDP), an
+//! endpoint-level resource-transfer API, and route expiry/budgeting. See the README's
+//! *Maturity* section and `design_docs/`.
 //!
 //! # Provenance
 //!
@@ -32,10 +41,7 @@ pub mod announce;
 pub mod destination;
 #[cfg(feature = "tokio")]
 pub mod endpoint;
-/// A reliable, in-order message layer over a link (sequencing, acks, retransmit).
 pub mod channel;
-/// A deterministic packet loss/delay oracle for testing reliability without radio.
-/// The [`LossModel`](lossy::LossModel) is pure; `connect`/pumping needs the tokio shell.
 pub mod lossy;
 pub mod hash;
 pub mod identity;

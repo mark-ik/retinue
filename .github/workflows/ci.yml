@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # The default build is the tokio endpoint plus everything below it.
+      - name: Build (all targets)
+        run: cargo build --all-targets
+
+      - name: Test (default features)
+        run: cargo test
+
+      # The sans-io core (codec, framing, links, resources, channel/buffer, proofs)
+      # must stand alone without the tokio runtime. Examples and endpoint tests are
+      # gated by required-features, so this builds and tests only that core.
+      - name: Test (no default features)
+        run: cargo test --no-default-features
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Docs (deny broken links)
+        run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+# The RNS interoperability oracle (oracle/) needs a Python venv and is not run here;
+# the bytes it produced are checked in under tests/fixtures/, so the gold tests that
+# pin the wire run in CI against those fixtures with no Python.

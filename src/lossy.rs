@@ -17,10 +17,11 @@
 //! about.
 //!
 //! ```no_run
+//! # #[cfg(feature = "tokio")]
+//! # async fn demo() {
 //! # use retinue::endpoint::Endpoint;
 //! # use retinue::identity::PrivateIdentity;
 //! # use retinue::lossy::{self, LossModel};
-//! # async fn demo() {
 //! let a = Endpoint::new(PrivateIdentity::from_secret_bytes(&[1u8; 64]));
 //! let b = Endpoint::new(PrivateIdentity::from_secret_bytes(&[2u8; 64]));
 //! // 20% packet loss and up to 40ms jitter each way, both reproducible.

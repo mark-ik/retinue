@@ -48,3 +48,99 @@ hex = "0.4.3"
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time"] }
 serde = "1.0.228"
 serde_json = "1.0.150"
+
+# Examples and integration tests that drive the endpoint/TCP runtime need the tokio
+# feature. Declaring it here lets `--no-default-features` build (and CI check) the
+# sans-io core alone by skipping them, instead of failing to compile.
+
+[[example]]
+name = "announce_logger"
+required-features = ["tokio"]
+
+[[example]]
+name = "endpoint_stream"
+required-features = ["tokio"]
+
+[[example]]
+name = "gemini_over_reticulum"
+required-features = ["tokio"]
+
+[[example]]
+name = "interop_tcp"
+required-features = ["tokio"]
+
+[[example]]
+name = "link_interop"
+required-features = ["tokio"]
+
+[[example]]
+name = "link_peer"
+required-features = ["tokio"]
+
+[[example]]
+name = "link_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "link_responder"
+required-features = ["tokio"]
+
+[[example]]
+name = "r2_pathfind"
+required-features = ["tokio"]
+
+[[example]]
+name = "reqresp_init_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "reqresp_interop"
+required-features = ["tokio"]
+
+[[example]]
+name = "reqresp_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_hmu_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_large_send"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_recv"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_send_large"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_send_multiseg"
+required-features = ["tokio"]
+
+[[example]]
+name = "resource_send_probe"
+required-features = ["tokio"]
+
+[[example]]
+name = "transport_node"
+required-features = ["tokio"]
+
+[[test]]
+name = "endpoint_multi"
+required-features = ["tokio"]
+
+[[test]]
+name = "link_setup_hardening"
+required-features = ["tokio"]
+
+[[test]]
+name = "reliable_stream"
+required-features = ["tokio"]
