@@ -25,14 +25,14 @@ use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
 use crate::address_book::AddressBook;
 use crate::announce::{self, Announce, RAND_HASH_LEN};
 use crate::destination::DestinationName;
 use crate::hash::AddressHash;
-use crate::iface::hdlc::{frame, Deframer};
 use crate::identity::{Identity, PrivateIdentity};
+use crate::iface::hdlc::{Deframer, frame};
 use crate::link::{self, CTX_CHANNEL, CTX_LINKCLOSE, Inbound, Link, LinkMode, LinkTrailer};
 use crate::packet::{Packet, PacketType};
 use crate::reliable::ReliableChannel;
@@ -97,7 +97,11 @@ impl AsyncRead for LinkStream {
 }
 
 impl AsyncWrite for LinkStream {
-    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &[u8]) -> Poll<io::Result<usize>> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
         Pin::new(&mut self.inner).poll_write(cx, buf)
     }
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
@@ -320,7 +324,13 @@ impl Shared {
     /// it has one (header-type-2 `[transport][dest]`), so a transport node forwards it.
     fn send_on(&self, iface: InterfaceId, pkt: Packet) {
         let addressed = self.address_for(iface, pkt);
-        if let Some(i) = self.interfaces.lock().unwrap().iter().find(|i| i.id == iface) {
+        if let Some(i) = self
+            .interfaces
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|i| i.id == iface)
+        {
             let _ = i.outbound.send(addressed);
         }
     }
@@ -381,7 +391,8 @@ impl Endpoint {
     pub fn new(identity: PrivateIdentity) -> Self {
         let (router_tx, mut router_rx) = mpsc::channel::<(InterfaceId, Packet)>(ROUTER_QUEUE);
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
-        let (reliable_accepted_tx, reliable_accepted_rx) = mpsc::unbounded_channel::<AcceptedLink>();
+        let (reliable_accepted_tx, reliable_accepted_rx) =
+            mpsc::unbounded_channel::<AcceptedLink>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
         let shared = Arc::new(Shared {
@@ -440,11 +451,10 @@ impl Endpoint {
     pub fn attach_interface(&self) -> Interface {
         let id = self.shared.next_iface_id.fetch_add(1, Ordering::Relaxed);
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Packet>();
-        self.shared
-            .interfaces
-            .lock()
-            .unwrap()
-            .push(Iface { id, outbound: out_tx });
+        self.shared.interfaces.lock().unwrap().push(Iface {
+            id,
+            outbound: out_tx,
+        });
         Interface {
             id,
             outbound: out_rx,
@@ -562,28 +572,50 @@ impl Endpoint {
 
     /// Establish a link to `dest` (whose identity is `peer`), returning it with the interface
     /// its proof arrived on. The stream discipline is chosen by the caller.
-    async fn establish(&self, dest: AddressHash, peer: Identity) -> io::Result<(Link, InterfaceId)> {
+    async fn establish(
+        &self,
+        dest: AddressHash,
+        peer: Identity,
+    ) -> io::Result<(Link, InterfaceId)> {
         let ephemeral = ephemeral_seed();
         let (pending, request) = link::PendingLink::open(
             dest,
             peer,
             &ephemeral,
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: crate::packet::MTU as u32 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: crate::packet::MTU as u32,
+            },
         );
 
         let link_id = pending.link_id();
         let (tx, rx) = oneshot::channel();
         self.shared.pending.lock().unwrap().insert(link_id, tx);
         // Stash the pending link so the router can prove it.
-        self.shared.pending_links.lock().unwrap().insert(link_id, pending);
+        self.shared
+            .pending_links
+            .lock()
+            .unwrap()
+            .insert(link_id, pending);
         // If setup does not complete — it times out below, or the caller drops this future —
         // remove both entries on the way out so a failed setup never leaks router state.
-        let mut guard = PendingGuard { shared: Arc::clone(&self.shared), link_id, armed: true };
+        let mut guard = PendingGuard {
+            shared: Arc::clone(&self.shared),
+            link_id,
+            armed: true,
+        };
 
         // Send the request toward the destination: on the interface the path table names
         // (addressed via its transport node if remote), or broadcast if we have no route yet
         // (a directly-connected peer).
-        match self.shared.path_table.lock().unwrap().get(&dest).map(|e| e.iface) {
+        match self
+            .shared
+            .path_table
+            .lock()
+            .unwrap()
+            .get(&dest)
+            .map(|e| e.iface)
+        {
             Some(iface) => self.shared.send_on(iface, request),
             None => self.shared.broadcast(request),
         }
@@ -593,8 +625,14 @@ impl Endpoint {
                 guard.armed = false; // the router already removed both entries on success
                 Ok(established)
             }
-            Ok(Err(_)) => Err(io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped")),
-            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "link setup timed out")),
+            Ok(Err(_)) => Err(io::Error::new(
+                io::ErrorKind::ConnectionReset,
+                "link setup dropped",
+            )),
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "link setup timed out",
+            )),
         }
     }
 
@@ -629,7 +667,12 @@ impl Endpoint {
             .recv()
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))?;
-        Ok(register_reliable_stream(&self.shared, accepted.link, accepted.iface, peer))
+        Ok(register_reliable_stream(
+            &self.shared,
+            accepted.link,
+            accepted.iface,
+            peer,
+        ))
     }
 
     /// The next validated announce, for building a host peer-id to destination map.
@@ -669,7 +712,10 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
     let id = shared.next_iface_id.fetch_add(1, Ordering::Relaxed);
     let (mut read_half, mut write_half) = stream.into_split();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Packet>();
-    shared.interfaces.lock().unwrap().push(Iface { id, outbound: out_tx });
+    shared.interfaces.lock().unwrap().push(Iface {
+        id,
+        outbound: out_tx,
+    });
 
     // Writer: frame and send this interface's outbound packets.
     track(shared, async move {
@@ -715,7 +761,12 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         // A packet whose destination is a link we bridge goes to the opposite side, whatever
         // its header type: the two endpoints may address it differently (one type-2 through
         // us, one type-1 direct, e.g. a responder that never learned it is behind us).
-        let bridged = shared.link_transport.lock().unwrap().get(&pkt.destination).copied();
+        let bridged = shared
+            .link_transport
+            .lock()
+            .unwrap()
+            .get(&pkt.destination)
+            .copied();
         if let Some((a, b)) = bridged {
             forward_on(shared, if iface == a { b } else { a }, pkt);
             return;
@@ -774,18 +825,26 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                     &pkt,
                     &shared.identity,
                     &ephemeral,
-                    LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: crate::packet::MTU as u32 },
+                    LinkTrailer {
+                        mode: LinkMode::Aes256Cbc,
+                        mtu: crate::packet::MTU as u32,
+                    },
                 ) {
                     shared.send_on(iface, proof);
                     if reliable {
                         // Defer the stream: accept_reliable binds it once given the peer
                         // identity to validate proofs against.
-                        let _ = shared
-                            .reliable_accepted_tx
-                            .send(AcceptedLink { link, iface, destination: dest });
+                        let _ = shared.reliable_accepted_tx.send(AcceptedLink {
+                            link,
+                            iface,
+                            destination: dest,
+                        });
                     } else {
                         let stream = register_stream(shared, link, iface);
-                        let _ = shared.accepted_tx.send(Accepted { stream, destination: dest });
+                        let _ = shared.accepted_tx.send(Accepted {
+                            stream,
+                            destination: dest,
+                        });
                     }
                 }
             }
@@ -811,12 +870,15 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                 // Otherwise a link-data proof for an established link: hand it to the
                 // reliable driver, which matches its hash to an outstanding sequence.
                 // Best-effort links never request proofs, so there is nothing to do.
-                let packets = shared.links.lock().unwrap().get(&pkt.destination).and_then(|e| {
-                    match &e.kind {
+                let packets = shared
+                    .links
+                    .lock()
+                    .unwrap()
+                    .get(&pkt.destination)
+                    .and_then(|e| match &e.kind {
                         LinkKind::Reliable { packets } => Some(packets.clone()),
                         LinkKind::BestEffort { .. } => None,
-                    }
-                });
+                    });
                 if let Some(packets) = packets {
                     let _ = packets.send(pkt);
                 }
@@ -830,7 +892,9 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                 match links.get(&pkt.destination) {
                     Some(e) => match &e.kind {
                         LinkKind::Reliable { packets } => (Some(packets.clone()), None),
-                        LinkKind::BestEffort { inbound } => (None, Some((e.link.clone(), inbound.clone()))),
+                        LinkKind::BestEffort { inbound } => {
+                            (None, Some((e.link.clone(), inbound.clone())))
+                        }
                     },
                     None => (None, None),
                 }
@@ -865,7 +929,12 @@ fn forward(shared: &Arc<Shared>, from: InterfaceId, pkt: Packet) {
     let dest = pkt.destination;
 
     // Route toward the destination by the path table.
-    let next = shared.path_table.lock().unwrap().get(&dest).map(|e| e.iface);
+    let next = shared
+        .path_table
+        .lock()
+        .unwrap()
+        .get(&dest)
+        .map(|e| e.iface);
     if let Some(out) = next {
         // A link request establishes a bridge: record the link id's two interfaces so the
         // proof and subsequent link data forward back the way they came.
@@ -901,7 +970,13 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
 
     shared.links.lock().unwrap().insert(
         link_id,
-        LinkEntry { link: link.clone(), kind: LinkKind::BestEffort { inbound: inbound_tx }, iface },
+        LinkEntry {
+            link: link.clone(),
+            kind: LinkKind::BestEffort {
+                inbound: inbound_tx,
+            },
+            iface,
+        },
     );
 
     // Inbound: decrypted data from the router → the stream's read side.
@@ -940,7 +1015,10 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
         }
     });
 
-    LinkStream { inner: mine, link_id }
+    LinkStream {
+        inner: mine,
+        link_id,
+    }
 }
 
 /// Build a **reliable** [`LinkStream`] for a live link: the RNS Channel/Buffer path with
@@ -949,7 +1027,12 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
 /// delivered packet, an inbound proof releasing its sequence, and retransmits on a clock —
 /// so the stream stays honest over a lossy interface. `peer` is the identity whose proofs
 /// this side validates (the destination's identity, for an initiator).
-fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId, peer: Identity) -> LinkStream {
+fn register_reliable_stream(
+    shared: &Arc<Shared>,
+    link: Link,
+    iface: InterfaceId,
+    peer: Identity,
+) -> LinkStream {
     let (mine, theirs) = tokio::io::duplex(DUPLEX_BUF);
     let (mut read_half, mut write_half) = tokio::io::split(theirs);
     let (pkt_tx, mut pkt_rx) = mpsc::unbounded_channel::<Packet>();
@@ -957,7 +1040,11 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
 
     shared.links.lock().unwrap().insert(
         link_id,
-        LinkEntry { link: link.clone(), kind: LinkKind::Reliable { packets: pkt_tx }, iface },
+        LinkEntry {
+            link: link.clone(),
+            kind: LinkKind::Reliable { packets: pkt_tx },
+            iface,
+        },
     );
 
     let close_link = link.clone();
@@ -1033,7 +1120,10 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
         drv.links.lock().unwrap().remove(&link_id);
     });
 
-    LinkStream { inner: mine, link_id }
+    LinkStream {
+        inner: mine,
+        link_id,
+    }
 }
 
 /// Spawn a task and record its abort handle on `shared`, so the endpoint's drop can cancel
@@ -1061,7 +1151,11 @@ impl Drop for PendingGuard {
     fn drop(&mut self) {
         if self.armed {
             self.shared.pending.lock().unwrap().remove(&self.link_id);
-            self.shared.pending_links.lock().unwrap().remove(&self.link_id);
+            self.shared
+                .pending_links
+                .lock()
+                .unwrap()
+                .remove(&self.link_id);
         }
     }
 }

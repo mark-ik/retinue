@@ -11,8 +11,8 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::link::{Link, LinkMode, LinkTrailer, PendingLink};
 use retinue::packet::{Packet, PacketType};
 
@@ -21,9 +21,9 @@ use retinue::packet::{Packet, PacketType};
 const DEST_SEED: [u8; 64] = {
     let mut s = [0u8; 64];
     let half = [
-        0xf0, 0xec, 0xbb, 0xa4, 0x9e, 0x78, 0x3d, 0xee, 0x14, 0xff, 0xc6, 0xc9, 0xf1, 0xe1,
-        0x25, 0x1e, 0xfa, 0x7d, 0x76, 0x29, 0xe0, 0xfa, 0x32, 0x41, 0x3c, 0x5c, 0x59, 0xec,
-        0x2e, 0x0f, 0x6d, 0x6c,
+        0xf0, 0xec, 0xbb, 0xa4, 0x9e, 0x78, 0x3d, 0xee, 0x14, 0xff, 0xc6, 0xc9, 0xf1, 0xe1, 0x25,
+        0x1e, 0xfa, 0x7d, 0x76, 0x29, 0xe0, 0xfa, 0x32, 0x41, 0x3c, 0x5c, 0x59, 0xec, 0x2e, 0x0f,
+        0x6d, 0x6c,
     ];
     let mut i = 0;
     while i < 32 {
@@ -80,7 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         destination,
         peer,
         &EPHEMERAL_SEED,
-        LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
     println!("LINK_REQUEST id={}", pending.link_id());
     send(&mut iface, &request).await;
@@ -97,18 +100,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("IO_ERROR {e}");
                 return Ok(());
             }
-            Ok(Ok(p)) if p.packet_type == PacketType::Proof => {
-                match pending.prove(&p) {
-                    Ok(link) => {
-                        println!("LINK_ESTABLISHED id={} mode={:?} mtu={}", link.id(), link.mode(), link.mtu());
-                        break link;
-                    }
-                    Err(e) => {
-                        println!("PROOF_REJECTED {e}");
-                        return Ok(());
-                    }
+            Ok(Ok(p)) if p.packet_type == PacketType::Proof => match pending.prove(&p) {
+                Ok(link) => {
+                    println!(
+                        "LINK_ESTABLISHED id={} mode={:?} mtu={}",
+                        link.id(),
+                        link.mode(),
+                        link.mtu()
+                    );
+                    break link;
                 }
-            }
+                Err(e) => {
+                    println!("PROOF_REJECTED {e}");
+                    return Ok(());
+                }
+            },
             Ok(Ok(_)) => continue,
         }
     };
@@ -119,7 +125,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     // 4. Send an encrypted application message. RNS must decrypt it (its packet callback).
-    send(&mut iface, &link.data_packet(b"hello-over-the-link", &iv_from(2))).await;
+    send(
+        &mut iface,
+        &link.data_packet(b"hello-over-the-link", &iv_from(2)),
+    )
+    .await;
     println!("SENT_DATA hello-over-the-link");
 
     // 5. Receive and decrypt RNS's reply.
@@ -130,7 +140,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         match tokio::time::timeout(remaining, iface.recv()).await {
             Err(_) => break,
             Ok(Err(_)) => continue,
-            Ok(Ok(p)) if p.destination == link.id() && p.packet_type == PacketType::Data && p.context == 0 => {
+            Ok(Ok(p))
+                if p.destination == link.id()
+                    && p.packet_type == PacketType::Data
+                    && p.context == 0 =>
+            {
                 match link.decrypt(&p) {
                     Ok(pt) => {
                         println!("RECV_DATA {}", String::from_utf8_lossy(&pt));

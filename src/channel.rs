@@ -113,9 +113,13 @@ impl Envelope {
     pub fn decode(bytes: &[u8]) -> Option<Envelope> {
         let msgtype = u16::from_be_bytes(bytes.get(0..2)?.try_into().ok()?);
         let sequence = u16::from_be_bytes(bytes.get(2..4)?.try_into().ok()?);
-        let length = u16::from_be_bytes(bytes.get(4..6)?.try_into().ok()? ) as usize;
+        let length = u16::from_be_bytes(bytes.get(4..6)?.try_into().ok()?) as usize;
         let payload = bytes.get(6..6 + length)?.to_vec();
-        Some(Envelope { msgtype, sequence, payload })
+        Some(Envelope {
+            msgtype,
+            sequence,
+            payload,
+        })
     }
 }
 
@@ -233,8 +237,18 @@ impl Channel {
             };
             let seq = self.send_next;
             self.send_next = self.send_next.wrapping_add(1);
-            out.push(Envelope { msgtype: self.msgtype, sequence: seq, payload: payload.clone() });
-            self.outstanding.insert(seq, Outstanding { payload, last_tx: now });
+            out.push(Envelope {
+                msgtype: self.msgtype,
+                sequence: seq,
+                payload: payload.clone(),
+            });
+            self.outstanding.insert(
+                seq,
+                Outstanding {
+                    payload,
+                    last_tx: now,
+                },
+            );
         }
 
         // Retransmit anything unproven for too long.
@@ -242,7 +256,11 @@ impl Channel {
         for (&seq, o) in &mut self.outstanding {
             if now.saturating_sub(o.last_tx) >= self.retx_timeout {
                 o.last_tx = now;
-                out.push(Envelope { msgtype: self.msgtype, sequence: seq, payload: o.payload.clone() });
+                out.push(Envelope {
+                    msgtype: self.msgtype,
+                    sequence: seq,
+                    payload: o.payload.clone(),
+                });
                 retransmitted = true;
             }
         }
@@ -307,7 +325,9 @@ impl Channel {
             if self.reorder.len() >= REORDER_MAX && !self.reorder.contains_key(&envelope.sequence) {
                 return false;
             }
-            self.reorder.entry(envelope.sequence).or_insert(envelope.payload);
+            self.reorder
+                .entry(envelope.sequence)
+                .or_insert(envelope.payload);
             true
         } else {
             // Behind `recv_next`: an already-delivered duplicate. Drop the payload but prove
@@ -435,7 +455,12 @@ impl Buffer {
 
     /// A buffer with explicit send / receive stream ids (each clamped to
     /// [`STREAM_ID_MAX`]) — one channel multiplexing distinct streams.
-    pub fn with_streams(channel: Channel, max_chunk: usize, send_stream_id: u16, recv_stream_id: u16) -> Self {
+    pub fn with_streams(
+        channel: Channel,
+        max_chunk: usize,
+        send_stream_id: u16,
+        recv_stream_id: u16,
+    ) -> Self {
         Self {
             channel,
             max_chunk: max_chunk.clamp(1, MAX_DATA_LEN),
@@ -461,7 +486,12 @@ impl Buffer {
     }
 
     fn send_frame(&mut self, data: Vec<u8>, eof: bool) {
-        let frame = StreamFrame { stream_id: self.send_stream_id, eof, compressed: false, data };
+        let frame = StreamFrame {
+            stream_id: self.send_stream_id,
+            eof,
+            compressed: false,
+            data,
+        };
         self.channel.send(frame.encode());
     }
 
@@ -545,8 +575,8 @@ impl Buffer {
 #[cfg(test)]
 mod tests {
     use super::{
-        Buffer, Channel, Envelope, StreamFrame, DEFAULT_RETX_TIMEOUT, MAX_DATA_LEN, STREAM_ID_MAX,
-        STREAM_MSGTYPE, WINDOW_INITIAL,
+        Buffer, Channel, DEFAULT_RETX_TIMEOUT, Envelope, MAX_DATA_LEN, STREAM_ID_MAX,
+        STREAM_MSGTYPE, StreamFrame, WINDOW_INITIAL,
     };
     use crate::lossy::LossModel;
 
@@ -561,14 +591,25 @@ mod tests {
             let sequence = v["sequence"].as_u64().unwrap() as u16;
             let payload = hex_bytes(v["payload_hex"].as_str().unwrap());
             let expected = v["packed_hex"].as_str().unwrap();
-            let env = Envelope { msgtype, sequence, payload };
-            assert_eq!(hex_str(&env.encode()), expected, "encode must equal RNS pack()");
+            let env = Envelope {
+                msgtype,
+                sequence,
+                payload,
+            };
+            assert_eq!(
+                hex_str(&env.encode()),
+                expected,
+                "encode must equal RNS pack()"
+            );
             assert_eq!(Envelope::decode(&env.encode()), Some(env), "round-trip");
         }
     }
 
     fn hex_bytes(s: &str) -> Vec<u8> {
-        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
     }
     fn hex_str(b: &[u8]) -> String {
         b.iter().map(|x| format!("{x:02x}")).collect()
@@ -602,13 +643,19 @@ mod tests {
     /// virtual clock, proving each delivered envelope back (subject to loss) — the
     /// proof-based model. Returns nothing; asserts exact reconstruction.
     fn stream_over_loss(drop_per_mille: u32, max_delay_ticks: u64, seed: u64) {
-        let payload: Vec<u8> = (0..4000u32).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+        let payload: Vec<u8> = (0..4000u32)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+            .collect();
         let mut tx = Buffer::new();
         let mut rx = Buffer::new();
         tx.write(&payload);
 
-        let mut fwd = LossModel::new(seed).drop_per_mille(drop_per_mille).max_delay_ms(max_delay_ticks);
-        let mut bwd = LossModel::new(seed ^ 0xFFFF).drop_per_mille(drop_per_mille).max_delay_ms(max_delay_ticks);
+        let mut fwd = LossModel::new(seed)
+            .drop_per_mille(drop_per_mille)
+            .max_delay_ms(max_delay_ticks);
+        let mut bwd = LossModel::new(seed ^ 0xFFFF)
+            .drop_per_mille(drop_per_mille)
+            .max_delay_ms(max_delay_ticks);
 
         // In flight: (arrival_tick, item). Forward carries envelopes; back carries the
         // sequence of a proof (the link auto-proves every received packet).
@@ -723,8 +770,16 @@ mod tests {
             }
         }
         assert_eq!(proven, 2000, "proved every packet");
-        assert!(c.window() > WINDOW_INITIAL, "window grew (got {})", c.window());
-        assert!(c.window() >= 16, "climbed into the fast tier (got {})", c.window());
+        assert!(
+            c.window() > WINDOW_INITIAL,
+            "window grew (got {})",
+            c.window()
+        );
+        assert!(
+            c.window() >= 16,
+            "climbed into the fast tier (got {})",
+            c.window()
+        );
     }
 
     #[test]
@@ -750,7 +805,11 @@ mod tests {
             }
         }
         let grown = c.window();
-        assert!(grown > 20, "window grew well above the floor first (got {})", grown);
+        assert!(
+            grown > 20,
+            "window grew well above the floor first (got {})",
+            grown
+        );
 
         // New data goes out, and nobody proves it. Past the timeout it retransmits.
         for i in 0..8u16 {
@@ -786,8 +845,16 @@ mod tests {
                 data: hex_bytes(v["data_hex"].as_str().unwrap()),
             };
             let expected = v["packed_hex"].as_str().unwrap();
-            assert_eq!(hex_str(&frame.encode()), expected, "encode must equal RNS pack()");
-            assert_eq!(StreamFrame::decode(&frame.encode()), Some(frame), "round-trip");
+            assert_eq!(
+                hex_str(&frame.encode()),
+                expected,
+                "encode must equal RNS pack()"
+            );
+            assert_eq!(
+                StreamFrame::decode(&frame.encode()),
+                Some(frame),
+                "round-trip"
+            );
         }
     }
 
@@ -798,15 +865,68 @@ mod tests {
         // and reports eof from stream 5 — not from stream 9's earlier eof.
         let mut r5 = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 5);
         let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
-            let _ = r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+            let _ = r.handle(Envelope {
+                msgtype: STREAM_MSGTYPE,
+                sequence: seq,
+                payload: f.encode(),
+            });
         };
-        feed(&mut r5, 0, StreamFrame { stream_id: 5, eof: false, compressed: false, data: vec![1, 2, 3] });
-        feed(&mut r5, 1, StreamFrame { stream_id: 9, eof: false, compressed: false, data: vec![0xAA] });
-        feed(&mut r5, 2, StreamFrame { stream_id: 5, eof: false, compressed: false, data: vec![4, 5] });
-        feed(&mut r5, 3, StreamFrame { stream_id: 9, eof: true, compressed: false, data: vec![] });
+        feed(
+            &mut r5,
+            0,
+            StreamFrame {
+                stream_id: 5,
+                eof: false,
+                compressed: false,
+                data: vec![1, 2, 3],
+            },
+        );
+        feed(
+            &mut r5,
+            1,
+            StreamFrame {
+                stream_id: 9,
+                eof: false,
+                compressed: false,
+                data: vec![0xAA],
+            },
+        );
+        feed(
+            &mut r5,
+            2,
+            StreamFrame {
+                stream_id: 5,
+                eof: false,
+                compressed: false,
+                data: vec![4, 5],
+            },
+        );
+        feed(
+            &mut r5,
+            3,
+            StreamFrame {
+                stream_id: 9,
+                eof: true,
+                compressed: false,
+                data: vec![],
+            },
+        );
         assert!(!r5.recv_finished(), "stream 9's eof must not end stream 5");
-        feed(&mut r5, 4, StreamFrame { stream_id: 5, eof: true, compressed: false, data: vec![6] });
-        assert_eq!(r5.read_available(), vec![1, 2, 3, 4, 5, 6], "only stream 5, in order");
+        feed(
+            &mut r5,
+            4,
+            StreamFrame {
+                stream_id: 5,
+                eof: true,
+                compressed: false,
+                data: vec![6],
+            },
+        );
+        assert_eq!(
+            r5.read_available(),
+            vec![1, 2, 3, 4, 5, 6],
+            "only stream 5, in order"
+        );
         assert!(r5.recv_finished(), "stream 5's eof");
     }
 
@@ -816,13 +936,51 @@ mod tests {
         // surface it, never splice compressed bytes into the stream as if they were data.
         let mut r = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 0);
         let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
-            let _ = r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+            let _ = r.handle(Envelope {
+                msgtype: STREAM_MSGTYPE,
+                sequence: seq,
+                payload: f.encode(),
+            });
         };
-        feed(&mut r, 0, StreamFrame { stream_id: 0, eof: false, compressed: false, data: vec![1, 2] });
-        feed(&mut r, 1, StreamFrame { stream_id: 0, eof: false, compressed: true, data: vec![9, 9, 9] });
-        feed(&mut r, 2, StreamFrame { stream_id: 0, eof: false, compressed: false, data: vec![3] });
-        assert_eq!(r.read_available(), vec![1, 2, 3], "compressed bytes dropped, not appended");
-        assert!(r.had_unsupported_frame(), "the compressed frame was surfaced");
+        feed(
+            &mut r,
+            0,
+            StreamFrame {
+                stream_id: 0,
+                eof: false,
+                compressed: false,
+                data: vec![1, 2],
+            },
+        );
+        feed(
+            &mut r,
+            1,
+            StreamFrame {
+                stream_id: 0,
+                eof: false,
+                compressed: true,
+                data: vec![9, 9, 9],
+            },
+        );
+        feed(
+            &mut r,
+            2,
+            StreamFrame {
+                stream_id: 0,
+                eof: false,
+                compressed: false,
+                data: vec![3],
+            },
+        );
+        assert_eq!(
+            r.read_available(),
+            vec![1, 2, 3],
+            "compressed bytes dropped, not appended"
+        );
+        assert!(
+            r.had_unsupported_frame(),
+            "the compressed frame was surfaced"
+        );
     }
 
     #[test]

@@ -26,8 +26,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use retinue::announce::{self, RAND_HASH_LEN};
 use retinue::destination::DestinationName;
 use retinue::hash::{AddressHash, NameHash, full_hash};
-use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation};
 
 const RETINUE_SEED: [u8; 64] = [0x11; 64];
@@ -112,7 +112,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  payload    {}", hex::encode(&request_payload));
     println!("  link_id? over-all-data  {id_over_all}");
     println!("  link_id? over-first-64  {id_over_keys}");
-    println!("  full_hash(payload)      {}", hex::encode(full_hash(&request_payload)));
+    println!(
+        "  full_hash(payload)      {}",
+        hex::encode(full_hash(&request_payload))
+    );
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     iface.send(&request).await?;
@@ -155,9 +158,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // RNS linking to US. This is the request format we need.
                         let (all, keys) = link_id_candidates(&p.payload);
                         println!("  >> RNS LINK REQUEST to {}", p.destination);
-                        println!("     payload is {} bytes ({})", p.payload.len(),
-                                 if p.payload.len() == 64 { "keys only, NO trailer" }
-                                 else { "LONGER than 64: there IS a trailer" });
+                        println!(
+                            "     payload is {} bytes ({})",
+                            p.payload.len(),
+                            if p.payload.len() == 64 {
+                                "keys only, NO trailer"
+                            } else {
+                                "LONGER than 64: there IS a trailer"
+                            }
+                        );
                         if p.payload.len() > 64 {
                             println!("     trailer  {}", hex::encode(&p.payload[64..]));
                         }
@@ -169,22 +178,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // RNS proving OUR link request. The address it proves to IS the
                         // link id, so this settles the derivation.
                         println!("  >> RNS PROOF, addressed to {}", p.destination);
-                        println!("     our link_id over-all-data : {id_over_all}  match={}",
-                                 p.destination == id_over_all);
-                        println!("     our link_id over-first-64 : {id_over_keys}  match={}",
-                                 p.destination == id_over_keys);
-                        println!("     proof payload is {} bytes ({})", p.payload.len(),
-                                 match p.payload.len() {
-                                     96 => "sig(64) + pubkey(32), NO trailer",
-                                     99 => "sig(64) + pubkey(32) + 3-byte trailer",
-                                     n if n > 96 => "longer than 96: trailer present",
-                                     _ => "unexpected",
-                                 });
+                        println!(
+                            "     our link_id over-all-data : {id_over_all}  match={}",
+                            p.destination == id_over_all
+                        );
+                        println!(
+                            "     our link_id over-first-64 : {id_over_keys}  match={}",
+                            p.destination == id_over_keys
+                        );
+                        println!(
+                            "     proof payload is {} bytes ({})",
+                            p.payload.len(),
+                            match p.payload.len() {
+                                96 => "sig(64) + pubkey(32), NO trailer",
+                                99 => "sig(64) + pubkey(32) + 3-byte trailer",
+                                n if n > 96 => "longer than 96: trailer present",
+                                _ => "unexpected",
+                            }
+                        );
                         if p.payload.len() > 96 {
                             println!("     trailer  {}", hex::encode(&p.payload[96..]));
                         }
                         println!("     first32  {}", hex::encode(&p.payload[..32]));
-                        println!("     last32   {}", hex::encode(&p.payload[p.payload.len().min(96) - 32..96.min(p.payload.len())]));
+                        println!(
+                            "     last32   {}",
+                            hex::encode(
+                                &p.payload[p.payload.len().min(96) - 32..96.min(p.payload.len())]
+                            )
+                        );
                     }
                     _ => {}
                 }

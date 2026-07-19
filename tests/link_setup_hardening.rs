@@ -70,12 +70,18 @@ async fn a_forged_proof_does_not_strand_link_setup() {
     });
 
     // The link must still open despite the forged proof racing ahead of the real one.
-    let stream = tokio::time::timeout(Duration::from_secs(8), client.open(dest, *server_id.public()))
-        .await
-        .expect("link opens despite the forged proof")
-        .expect("link established");
+    let stream = tokio::time::timeout(
+        Duration::from_secs(8),
+        client.open(dest, *server_id.public()),
+    )
+    .await
+    .expect("link opens despite the forged proof")
+    .expect("link established");
     assert_eq!(stream.link_id(), stream.link_id());
-    assert!(injected.load(Ordering::SeqCst), "the forged proof was actually injected");
+    assert!(
+        injected.load(Ordering::SeqCst),
+        "the forged proof was actually injected"
+    );
 }
 
 /// Dropping an endpoint must release its runtime. Without cancellation the router task holds
@@ -93,5 +99,8 @@ async fn dropping_the_endpoint_releases_its_tasks() {
     let got = tokio::time::timeout(Duration::from_secs(3), iface.next_outbound())
         .await
         .expect("outbound closes rather than hanging");
-    assert_eq!(got, None, "the interface's outbound closes once the endpoint is dropped");
+    assert_eq!(
+        got, None,
+        "the interface's outbound closes once the endpoint is dropped"
+    );
 }

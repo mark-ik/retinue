@@ -13,8 +13,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::announce::{self, Announce, RAND_HASH_LEN};
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{RecvError, TcpInterfaceListener};
 use retinue::packet::PacketType;
 
 /// retinue's own identity for the gate. Deliberately not the oracle's, so the two
@@ -90,7 +90,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 match Announce::decode(&p) {
                     Ok(a) => {
-                        println!("RECV_ANNOUNCE {} ratchet={}", a.destination, a.ratchet.is_some());
+                        println!(
+                            "RECV_ANNOUNCE {} ratchet={}",
+                            a.destination,
+                            a.ratchet.is_some()
+                        );
                         println!("  identity  {}", a.identity.hash());
                         println!("  app_data  {:?}", String::from_utf8_lossy(&a.app_data));
                         println!("VALIDATED_RNS_ANNOUNCE");

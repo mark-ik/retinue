@@ -41,7 +41,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::spawn(async move {
                     let mut buf = [0u8; 256];
                     while let Ok(n) = stream.read(&mut buf).await {
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         let mut reply = b"echo:".to_vec();
                         reply.extend_from_slice(&buf[..n]);
                         let _ = stream.write_all(&reply).await;
@@ -61,9 +63,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             tokio::time::sleep(Duration::from_millis(300)).await;
         }
 
-        let responder_dest = name.destination_hash(
-            PrivateIdentity::from_secret_bytes(&RESPONDER_SEED).public(),
-        );
+        let responder_dest =
+            name.destination_hash(PrivateIdentity::from_secret_bytes(&RESPONDER_SEED).public());
         // Wait until we have learned the responder's identity from an announce.
         let deadline = tokio::time::Instant::now() + Duration::from_secs(12);
         while ep.resolve(responder_dest).is_none() && tokio::time::Instant::now() < deadline {
@@ -72,11 +73,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let identity = match ep.resolve(responder_dest) {
             Some(i) => i,
-            None => { println!("NO_ROUTE"); return Ok(()); }
+            None => {
+                println!("NO_ROUTE");
+                return Ok(());
+            }
         };
         println!("RESOLVED_RESPONDER");
 
-        match tokio::time::timeout(Duration::from_secs(10), ep.open(responder_dest, identity)).await {
+        match tokio::time::timeout(Duration::from_secs(10), ep.open(responder_dest, identity)).await
+        {
             Ok(Ok(mut stream)) => {
                 println!("LINKED {}", stream.link_id());
                 stream.write_all(b"ping-through").await?;

@@ -69,7 +69,8 @@ pub fn map_hash(part: &[u8], random_hash: &[u8]) -> [u8; MAPHASH_LEN] {
 pub fn compress(content: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::best());
-    enc.write_all(content).expect("writing to a Vec cannot fail");
+    enc.write_all(content)
+        .expect("writing to a Vec cannot fail");
     enc.finish().expect("finishing a Vec encoder cannot fail")
 }
 
@@ -410,7 +411,11 @@ pub fn build_hmu(resource_hash: &[u8; 32], segment: i64, hashes: &[[u8; MAPHASH_
 
 /// Parse an HMU payload.
 pub fn parse_hmu(payload: &[u8]) -> Result<Hmu> {
-    let resource_hash: [u8; 32] = payload.get(..32).ok_or(Error::BadRequest)?.try_into().expect("32");
+    let resource_hash: [u8; 32] = payload
+        .get(..32)
+        .ok_or(Error::BadRequest)?
+        .try_into()
+        .expect("32");
     let mut r = MapReader::new(&payload[32..]);
     if r.byte()? != 0x92 {
         return Err(Error::BadRequest);
@@ -644,7 +649,12 @@ pub struct Outgoing {
 impl Outgoing {
     /// Prepare to send `data`, already sealed into `token` (see [`content`] and the link's
     /// `seal`). `compressed` records whether `token`'s plaintext was bz2-compressed.
-    pub fn new(data: &[u8], token: &[u8], random_hash: [u8; RANDOM_HASH_LEN], compressed: bool) -> Self {
+    pub fn new(
+        data: &[u8],
+        token: &[u8],
+        random_hash: [u8; RANDOM_HASH_LEN],
+        compressed: bool,
+    ) -> Self {
         let hash = resource_hash(data, &random_hash);
         let (parts, _hashmap) = split_parts(token, &random_hash);
         let mut map_hashes = Vec::with_capacity(parts.len());
@@ -1044,7 +1054,10 @@ mod tests {
         let h = parse_hmu(&hmu).unwrap();
         assert_eq!(h.segment, 1);
         assert_eq!(h.hashes.len(), 13);
-        assert_eq!(hex::encode(h.resource_hash), "34fa88d9f5bbe24374673ed08a7a1748c8cef5a281c5d82866f530026d863a08");
+        assert_eq!(
+            hex::encode(h.resource_hash),
+            "34fa88d9f5bbe24374673ed08a7a1748c8cef5a281c5d82866f530026d863a08"
+        );
     }
 
     /// A >74-part resource round-trips sender -> receiver through the windowed HMU path,
@@ -1054,22 +1067,34 @@ mod tests {
     fn windowed_sender_receiver_round_trip() {
         use crate::destination::DestinationName;
         use crate::identity::PrivateIdentity;
-        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
+        use crate::link::{LinkMode, LinkTrailer, PendingLink, accept};
 
         let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
         let (pending, req) = PendingLink::open(
             DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
             *dest_id.public(),
             &[0x33; 64],
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
         );
-        let (recv_link, proof_pkt) =
-            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
-                .unwrap();
+        let (recv_link, proof_pkt) = accept(
+            &req,
+            &dest_id,
+            &[0x99; 64],
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
+        )
+        .unwrap();
         let send_link = pending.prove(&proof_pkt).unwrap();
 
         // ~120 parts of data.
-        let data: Vec<u8> = (0..55_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8).collect();
+        let data: Vec<u8> = (0..55_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8)
+            .collect();
         let rh = [0xAB, 0xCD, 0xEF, 0x01];
         let token = send_link.seal(&content(&data, &rh), &[7u8; 16]);
         let mut out = Outgoing::new(&data, &token, rh, false);
@@ -1096,7 +1121,9 @@ mod tests {
                 panic!("stuck: not complete, nothing to request, no HMU needed");
             }
         }
-        let recovered = inc.recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap()).unwrap();
+        let recovered = inc
+            .recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap())
+            .unwrap();
         assert_eq!(recovered, data);
         assert_eq!(inc.proof(&recovered), out.expected_proof());
     }
@@ -1107,23 +1134,35 @@ mod tests {
     fn multi_segment_round_trip() {
         use crate::destination::DestinationName;
         use crate::identity::PrivateIdentity;
-        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
+        use crate::link::{LinkMode, LinkTrailer, PendingLink, accept};
 
         let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
         let (pending, req) = PendingLink::open(
             DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
             *dest_id.public(),
             &[0x33; 64],
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
         );
-        let (recv_link, proof_pkt) =
-            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
-                .unwrap();
+        let (recv_link, proof_pkt) = accept(
+            &req,
+            &dest_id,
+            &[0x99; 64],
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
+        )
+        .unwrap();
         let send_link = pending.prove(&proof_pkt).unwrap();
 
         // Two segments of ~90 parts each (small "MAX_SEGMENT_SIZE" for the test).
         const SEG: usize = 40_000;
-        let data: Vec<u8> = (0..90_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8).collect();
+        let data: Vec<u8> = (0..90_000u32)
+            .map(|i| (i.wrapping_mul(2_654_435_761) >> 8) as u8)
+            .collect();
         let seg0_rh = [1u8, 2, 3, 4];
         let original = resource_hash(&data[..SEG.min(data.len())], &seg0_rh);
 
@@ -1132,8 +1171,12 @@ mod tests {
         for (idx, chunk) in data.chunks(SEG).enumerate() {
             let rh = [(idx as u8) + 1, 2, 3, 4];
             let token = send_link.seal(&content(chunk, &rh), &[7u8; 16]);
-            let mut out = Outgoing::new(chunk, &token, rh, false)
-                .with_segment(idx as i64 + 1, total_segs, data.len() as u64, original);
+            let mut out = Outgoing::new(chunk, &token, rh, false).with_segment(
+                idx as i64 + 1,
+                total_segs,
+                data.len() as u64,
+                original,
+            );
             // Check the advertisement carries the shared identity and total size.
             let adv = out.advertisement();
             assert_eq!(adv.original_hash, original.to_vec());
@@ -1156,7 +1199,9 @@ mod tests {
                     inc.ingest_hmu(&hmu);
                 }
             }
-            let body = inc.recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap()).unwrap();
+            let body = inc
+                .recover(&recv_link.open(&inc.assemble_token().unwrap()).unwrap())
+                .unwrap();
             assembled.extend_from_slice(&body);
         }
         assert_eq!(assembled, data);
@@ -1189,9 +1234,15 @@ mod tests {
         let h = resource_hash(data, &rh);
         // map hash is a prefix of SHA256(part || rh)
         let mh = map_hash(data, &rh);
-        assert_eq!(&crate::hash::full_hash(&[&data[..], &rh[..]].concat())[..4], &mh);
+        assert_eq!(
+            &crate::hash::full_hash(&[&data[..], &rh[..]].concat())[..4],
+            &mh
+        );
         // proof folds the resource hash back in
-        assert_eq!(proof(data, &h), crate::hash::full_hash(&[&data[..], &h[..]].concat()));
+        assert_eq!(
+            proof(data, &h),
+            crate::hash::full_hash(&[&data[..], &h[..]].concat())
+        );
     }
 
     /// The sender and receiver halves agree end to end, through a real AES token: build an
@@ -1199,9 +1250,9 @@ mod tests {
     /// the live RNS gate without needing RNS.
     #[test]
     fn sender_and_receiver_round_trip() {
-        use crate::identity::PrivateIdentity;
-        use crate::link::{accept, LinkMode, LinkTrailer, PendingLink};
         use crate::destination::DestinationName;
+        use crate::identity::PrivateIdentity;
+        use crate::link::{LinkMode, LinkTrailer, PendingLink, accept};
 
         // A link to seal/open with.
         let dest_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
@@ -1209,11 +1260,21 @@ mod tests {
             DestinationName::new("retinue", ["r"]).destination_hash(dest_id.public()),
             *dest_id.public(),
             &[0x33; 64],
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
         );
-        let (recv_link, proof_pkt) =
-            accept(&req, &dest_id, &[0x99; 64], LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 })
-                .unwrap();
+        let (recv_link, proof_pkt) = accept(
+            &req,
+            &dest_id,
+            &[0x99; 64],
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
+        )
+        .unwrap();
         let send_link = pending.prove(&proof_pkt).unwrap();
 
         // Sender: content = rh || data, sealed, split, advertised.

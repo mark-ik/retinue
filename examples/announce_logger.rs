@@ -11,7 +11,11 @@ use retinue::packet::{Packet, PacketType};
 
 fn rh(salt: u8) -> [u8; RAND_HASH_LEN] {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut o = [0u8; RAND_HASH_LEN];
     o.copy_from_slice(&n[..RAND_HASH_LEN]);
     o[0] ^= salt;
@@ -47,7 +51,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ticker = tokio::time::interval(announce_every);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     // Send the first announce immediately.
-    iface.send(&announce::build(&identity, name.name_hash(), &rh(salt), None, label.as_bytes())).await?;
+    iface
+        .send(&announce::build(
+            &identity,
+            name.name_hash(),
+            &rh(salt),
+            None,
+            label.as_bytes(),
+        ))
+        .await?;
 
     loop {
         if tokio::time::Instant::now() >= deadline {

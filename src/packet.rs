@@ -214,7 +214,9 @@ impl Packet {
     /// same way RNS excludes it, so the hash is stable across a transport hop.
     pub fn hash(&self) -> AddressHash {
         AddressHash::from_bytes(
-            self.full_hash()[..ADDRESS_HASH_LEN].try_into().expect("32 >= 16"),
+            self.full_hash()[..ADDRESS_HASH_LEN]
+                .try_into()
+                .expect("32 >= 16"),
         )
     }
 
@@ -325,7 +327,10 @@ mod tests {
     fn oversize_input_is_rejected() {
         // A buffer larger than the wire MTU is not a valid packet; the decoder must reject it
         // rather than accept an arbitrarily large payload.
-        assert!(matches!(Packet::decode(&vec![0u8; MTU + 1]), Err(Error::Oversize)));
+        assert!(matches!(
+            Packet::decode(&vec![0u8; MTU + 1]),
+            Err(Error::Oversize)
+        ));
         // A packet exactly at the MTU still decodes.
         assert!(Packet::decode(&vec![0u8; MTU]).is_ok());
     }
@@ -360,6 +365,9 @@ mod tests {
         )
         .unwrap();
         let packet = Packet::decode(&raw).unwrap();
-        assert_eq!(packet.hash().to_string(), "9ab513b3bba3e87c5878bba6bf421119");
+        assert_eq!(
+            packet.hash().to_string(),
+            "9ab513b3bba3e87c5878bba6bf421119"
+        );
     }
 }

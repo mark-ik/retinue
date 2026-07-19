@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::announce::{self, RAND_HASH_LEN};
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
 use retinue::link::{self, Inbound, Link, LinkMode, LinkTrailer};
 use retinue::packet::{Packet, PacketType};
 
@@ -23,14 +23,22 @@ const IDENTITY_SEED: [u8; 64] = [0x11; 64];
 const EPHEMERAL_SEED: [u8; 64] = [0x77; 64];
 
 fn rand_hash() -> [u8; RAND_HASH_LEN] {
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut out = [0u8; RAND_HASH_LEN];
     out.copy_from_slice(&n[..RAND_HASH_LEN]);
     out
 }
 
 fn iv(nonce: u8) -> [u8; 16] {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut iv = [0u8; 16];
     iv[..8].copy_from_slice(&t[..8]);
     iv[15] = nonce;
@@ -53,7 +61,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let our_dest = name.destination_hash(identity.public());
 
     // Announce so RNS learns us and can link to us.
-    let ann = announce::build(&identity, name.name_hash(), &rand_hash(), None, b"responder");
+    let ann = announce::build(
+        &identity,
+        name.name_hash(),
+        &rand_hash(),
+        None,
+        b"responder",
+    );
     send(&mut iface, &ann).await;
     println!("SENT_ANNOUNCE {our_dest}");
 
@@ -66,7 +80,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let packet = match tokio::time::timeout(remaining, iface.recv()).await {
             Err(_) => break,
-            Ok(Err(RecvError::Io(e))) => { println!("IO_ERROR {e}"); break; }
+            Ok(Err(RecvError::Io(e))) => {
+                println!("IO_ERROR {e}");
+                break;
+            }
             Ok(Err(RecvError::Wire(_))) => continue,
             Ok(Ok(p)) => p,
         };
@@ -79,9 +96,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &packet,
                     &identity,
                     &EPHEMERAL_SEED,
-                    LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+                    LinkTrailer {
+                        mode: LinkMode::Aes256Cbc,
+                        mtu: 500,
+                    },
                 )?;
-                println!("LINK_ACCEPTED id={} mode={:?} mtu={}", l.id(), l.mode(), l.mtu());
+                println!(
+                    "LINK_ACCEPTED id={} mode={:?} mtu={}",
+                    l.id(),
+                    l.mode(),
+                    l.mtu()
+                );
                 send(&mut iface, &proof).await;
                 println!("SENT_PROOF");
                 link = Some(l);
@@ -102,7 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("SENT_KEEPALIVE_RESPONSE");
                 }
                 Some(Inbound::Rtt) => println!("RECV_RTT"),
-                Some(Inbound::Close) => { println!("RECV_CLOSE"); break; }
+                Some(Inbound::Close) => {
+                    println!("RECV_CLOSE");
+                    break;
+                }
                 Some(Inbound::KeepAliveResponse) => println!("RECV_KEEPALIVE_RESPONSE"),
                 Some(Inbound::Request(_) | Inbound::Response(_) | Inbound::Unknown) | None => {}
             },

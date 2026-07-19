@@ -41,9 +41,7 @@ use x25519_dalek::PublicKey as XPublicKey;
 
 use crate::hash::AddressHash;
 use crate::identity::{Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
-use crate::packet::{
-    DestinationType, HeaderType, Packet, PacketType, Propagation,
-};
+use crate::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation};
 use crate::token::{DerivedKeys, IV_LEN};
 use crate::{Error, Result};
 
@@ -272,8 +270,9 @@ impl PendingLink {
             return Err(Error::Truncated);
         }
 
-        let signature: [u8; SIGNATURE_LEN] =
-            proof.payload[..SIGNATURE_LEN].try_into().expect("checked length");
+        let signature: [u8; SIGNATURE_LEN] = proof.payload[..SIGNATURE_LEN]
+            .try_into()
+            .expect("checked length");
         let peer_eph: [u8; KEY_LEN] = proof.payload[SIGNATURE_LEN..SIGNATURE_LEN + KEY_LEN]
             .try_into()
             .expect("checked length");
@@ -336,8 +335,9 @@ pub fn accept(
     }
 
     let id = link_id(request)?;
-    let peer_eph_x: [u8; KEY_LEN] =
-        request.payload[..KEY_LEN].try_into().expect("checked length");
+    let peer_eph_x: [u8; KEY_LEN] = request.payload[..KEY_LEN]
+        .try_into()
+        .expect("checked length");
 
     let ephemeral = PrivateIdentity::from_secret_bytes(ephemeral_seed);
     let our_eph_x = *ephemeral.public().x25519_bytes();
@@ -345,9 +345,8 @@ pub fn accept(
 
     // Sign link_id || our_eph_x || our_long_term_ed25519 || trailer with the destination's
     // identity, exactly as the initiator will reconstruct and verify it.
-    let mut signed = Vec::with_capacity(
-        crate::hash::ADDRESS_HASH_LEN + KEY_LEN + KEY_LEN + TRAILER_LEN,
-    );
+    let mut signed =
+        Vec::with_capacity(crate::hash::ADDRESS_HASH_LEN + KEY_LEN + KEY_LEN + TRAILER_LEN);
     signed.extend_from_slice(id.as_slice());
     signed.extend_from_slice(&our_eph_x);
     signed.extend_from_slice(destination.public().ed25519_bytes());
@@ -704,14 +703,27 @@ mod tests {
     #[test]
     fn trailers_round_trip() {
         for t in [
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 8192 },
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
-            LinkTrailer { mode: LinkMode::Aes128Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 8192,
+            },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
+            LinkTrailer {
+                mode: LinkMode::Aes128Cbc,
+                mtu: 500,
+            },
         ] {
             assert_eq!(LinkTrailer::decode(&t.encode()).unwrap(), t);
         }
         assert_eq!(
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 8192 }.encode(),
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 8192
+            }
+            .encode(),
             [0x20, 0x20, 0x00],
         );
     }
@@ -729,14 +741,15 @@ mod tests {
     fn initiator_and_responder_agree() {
         let dest_identity = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
         let peer = *dest_identity.public();
-        let dest_hash =
-            DestinationName::new("retinue", ["test"]).destination_hash(&peer);
+        let dest_hash = DestinationName::new("retinue", ["test"]).destination_hash(&peer);
 
-        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let trailer = LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        };
 
         // Initiator opens.
-        let (pending, request) =
-            PendingLink::open(dest_hash, peer, &[0x33; 64], trailer);
+        let (pending, request) = PendingLink::open(dest_hash, peer, &[0x33; 64], trailer);
 
         // Responder accepts and proves.
         let (responder_link, proof) =
@@ -751,7 +764,10 @@ mod tests {
         // The shared key round-trips: what one encrypts, the other decrypts.
         let msg = b"across the link";
         let packet = initiator_link.data_packet(msg, &[0x01; 16]);
-        assert_eq!(responder_link.receive(&packet), Some(Inbound::Data(msg.to_vec())));
+        assert_eq!(
+            responder_link.receive(&packet),
+            Some(Inbound::Data(msg.to_vec()))
+        );
 
         let back = responder_link.data_packet(b"and back", &[0x02; 16]);
         assert_eq!(
@@ -767,13 +783,19 @@ mod tests {
             DestinationName::new("retinue", ["test"]).destination_hash(dest_identity.public()),
             *dest_identity.public(),
             &[0x33; 64],
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
         );
         let (link, _proof) = accept(
             &request,
             &dest_identity,
             &[0x99; 64],
-            LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+            LinkTrailer {
+                mode: LinkMode::Aes256Cbc,
+                mtu: 500,
+            },
         )
         .unwrap();
 
@@ -809,11 +831,10 @@ mod tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let seed: [u8; 64] =
-            hex::decode(doc["prover_identity_secret_seed_hex"].as_str().unwrap())
-                .unwrap()
-                .try_into()
-                .unwrap();
+        let seed: [u8; 64] = hex::decode(doc["prover_identity_secret_seed_hex"].as_str().unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
         let prover = PrivateIdentity::from_secret_bytes(&seed);
 
         // Generate: our proof packet is RNS's wire bytes exactly.
@@ -839,7 +860,11 @@ mod tests {
         // A tampered signature is rejected, and a proof for a different link is not ours.
         let mut bad = proof.clone();
         *bad.payload.last_mut().unwrap() ^= 0x01;
-        assert_eq!(read_data_proof(link_id, &bad, &peer), None, "tamper rejected");
+        assert_eq!(
+            read_data_proof(link_id, &bad, &peer),
+            None,
+            "tamper rejected"
+        );
         assert_eq!(
             read_data_proof(AddressHash::from_bytes([0x00; 16]), &proof, &peer),
             None,

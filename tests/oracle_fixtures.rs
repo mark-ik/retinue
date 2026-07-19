@@ -6,13 +6,13 @@
 //! Regenerate with `oracle/.venv/Scripts/python.exe -u oracle/capture.py`. The fixtures
 //! are committed, so this suite needs no Python.
 
+use retinue::Error;
 use retinue::announce::{self, Announce, RAND_HASH_LEN};
 use retinue::destination::{DestinationName, destination_hash};
 use retinue::hash::NameHash;
 use retinue::identity::PrivateIdentity;
 use retinue::packet::{Packet, PacketType};
 use retinue::token;
-use retinue::Error;
 
 /// The fixed private identity the oracle used. x25519_secret(32) || ed25519_seed(32).
 const SEED_HEX: &str = concat!(
@@ -50,7 +50,10 @@ fn identity_derives_the_public_key_rns_derived() {
 
 #[test]
 fn identity_hash_is_trunc16_sha256_of_the_public_key() {
-    assert_eq!(identity().hash().to_string(), "70de4e01d8064fae79daa0e198233f56");
+    assert_eq!(
+        identity().hash().to_string(),
+        "70de4e01d8064fae79daa0e198233f56"
+    );
 }
 
 /// The known-answer test. RNS and the Beechat crate independently agree on this value, and
@@ -87,7 +90,11 @@ fn rns_announces_validate() {
         ("announce_plain.bin", false, &b""[..]),
         ("announce_appdata.bin", false, &b"retinue-r0-fixture"[..]),
         ("announce_ratchet.bin", true, &b""[..]),
-        ("announce_ratchet_appdata.bin", true, &b"retinue-r0-fixture"[..]),
+        (
+            "announce_ratchet_appdata.bin",
+            true,
+            &b"retinue-r0-fixture"[..],
+        ),
     ] {
         let raw = fixture(name);
         let packet = Packet::decode(&raw).unwrap_or_else(|e| panic!("{name}: decode: {e}"));
@@ -109,7 +116,11 @@ fn rns_announces_validate() {
         assert_eq!(a.identity.hash(), identity().hash(), "{name}");
 
         // Re-encoding must reproduce the original bytes exactly.
-        assert_eq!(packet.encode(), raw, "{name}: re-encode is not byte-identical");
+        assert_eq!(
+            packet.encode(),
+            raw,
+            "{name}: re-encode is not byte-identical"
+        );
     }
 }
 
@@ -179,7 +190,11 @@ fn announces_we_build_match_rns_byte_for_byte() {
         ("announce_plain.bin", false, &b""[..]),
         ("announce_appdata.bin", false, &b"retinue-r0-fixture"[..]),
         ("announce_ratchet.bin", true, &b""[..]),
-        ("announce_ratchet_appdata.bin", true, &b"retinue-r0-fixture"[..]),
+        (
+            "announce_ratchet_appdata.bin",
+            true,
+            &b"retinue-r0-fixture"[..],
+        ),
     ] {
         let raw = fixture(name);
         let original = Packet::decode(&raw).unwrap();

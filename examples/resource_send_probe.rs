@@ -6,9 +6,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
-use retinue::link::{LinkMode, LinkTrailer, PendingLink, CTX_RESOURCE, CTX_RESOURCE_ADV};
+use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
+use retinue::link::{CTX_RESOURCE, CTX_RESOURCE_ADV, LinkMode, LinkTrailer, PendingLink};
 use retinue::packet::{Packet, PacketType};
 use retinue::resource;
 
@@ -16,13 +16,19 @@ const DEST_SEED: [u8; 64] = [0x11; 64];
 const EPHEMERAL_SEED: [u8; 64] = [0x33; 64];
 
 fn iv(n: u8) -> [u8; 16] {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut v = [0u8; 16];
     v[..8].copy_from_slice(&t[..8]);
     v[15] = n;
     v
 }
-async fn send(i: &mut TcpInterface, p: &Packet) { i.send(p).await.expect("send"); }
+async fn send(i: &mut TcpInterface, p: &Packet) {
+    i.send(p).await.expect("send");
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,13 +39,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["recv"]).destination_hash(&peer);
     let (pending, request) = PendingLink::open(
-        dest, peer, &EPHEMERAL_SEED, LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        dest,
+        peer,
+        &EPHEMERAL_SEED,
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
     send(&mut iface, &request).await;
 
     let link = loop {
         match tokio::time::timeout(Duration::from_secs(10), iface.recv()).await {
-            Err(_) => { println!("TIMEOUT proof"); return Ok(()); }
+            Err(_) => {
+                println!("TIMEOUT proof");
+                return Ok(());
+            }
             Ok(Err(_)) => continue,
             Ok(Ok(p)) if p.packet_type == PacketType::Proof => break pending.prove(&p)?,
             Ok(Ok(_)) => continue,
@@ -51,15 +66,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build an uncompressed resource: seal the data as one token, split into parts.
     // Small enough to stay in RNS's in-RAM path (larger ones hit its disk storage).
-    let data: Vec<u8> = (0..300u32).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+    let data: Vec<u8> = (0..300u32)
+        .map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8)
+        .collect();
     let random_hash = [0xA5, 0x5A, 0x12, 0x34];
     // The transferred content is random_hash || data; seal that, not the bare payload.
     let token = link.seal(&resource::content(&data, &random_hash), &iv(2));
     let (adv, parts) = resource::advertise(&data, &token, random_hash, false);
     let expected_proof = resource::proof(&data, &{
-        let mut h = [0u8; 32]; h.copy_from_slice(&adv.resource_hash); h
+        let mut h = [0u8; 32];
+        h.copy_from_slice(&adv.resource_hash);
+        h
     });
-    println!("ADV t={} d={} n={} parts={}", adv.transfer_size, adv.data_size, adv.parts, parts.len());
+    println!(
+        "ADV t={} d={} n={} parts={}",
+        adv.transfer_size,
+        adv.data_size,
+        adv.parts,
+        parts.len()
+    );
     println!("EXPECTED_PROOF {}", hex::encode(expected_proof));
 
     // Map each part by its 4-byte map hash, so a windowed request can be answered exactly.
@@ -69,7 +94,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
 
     // Send the advertisement (sealed, context 0x02).
-    send(&mut iface, &link.sealed_packet(CTX_RESOURCE_ADV, &adv.pack(), &iv(3))).await;
+    send(
+        &mut iface,
+        &link.sealed_packet(CTX_RESOURCE_ADV, &adv.pack(), &iv(3)),
+    )
+    .await;
     println!("SENT_ADV");
 
     // Respond to whatever RNS asks. Dump every packet so we learn REQ (0x03) and PRF (0x05).
@@ -85,8 +114,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let dec = link.decrypt(&packet).ok();
         match &dec {
-            Some(pt) => println!("RX ctx=0x{:02x} decrypted[{}] {}", packet.context, pt.len(), hex::encode(pt)),
-            None => println!("RX ctx=0x{:02x} raw[{}] {}", packet.context, packet.payload.len(), hex::encode(&packet.payload)),
+            Some(pt) => println!(
+                "RX ctx=0x{:02x} decrypted[{}] {}",
+                packet.context,
+                pt.len(),
+                hex::encode(pt)
+            ),
+            None => println!(
+                "RX ctx=0x{:02x} raw[{}] {}",
+                packet.context,
+                packet.payload.len(),
+                hex::encode(&packet.payload)
+            ),
         }
         match packet.context {
             // Part request: flag(1) || resource_hash(32) || requested map_hash(4)*

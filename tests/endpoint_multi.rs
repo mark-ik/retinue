@@ -48,7 +48,10 @@ async fn spawn_leaf(seed: [u8; 64], aspect: &'static str, hub_addr: std::net::So
 #[tokio::test]
 async fn transport_node_forwards_announces() {
     let hub = Endpoint::new(PrivateIdentity::from_secret_bytes(&[9u8; 64]));
-    let addr = hub.listen_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = hub
+        .listen_tcp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     hub.enable_routing();
 
     let a_id = PrivateIdentity::from_secret_bytes(&[2u8; 64]);
@@ -75,8 +78,14 @@ async fn transport_node_forwards_announces() {
     while a.resolve(b_dest).is_none() && tokio::time::Instant::now() < deadline {
         let _ = tokio::time::timeout(Duration::from_millis(500), a.next_announcement()).await;
     }
-    assert!(a.resolve(b_dest).is_some(), "A should learn B's dest via the hub");
-    assert!(b.resolve(a_dest).is_some(), "B should learn A's dest via the hub");
+    assert!(
+        a.resolve(b_dest).is_some(),
+        "A should learn B's dest via the hub"
+    );
+    assert!(
+        b.resolve(a_dest).is_some(),
+        "B should learn A's dest via the hub"
+    );
 
     // The hub knows a route to both, and both are one hop away through it.
     assert_eq!(hub.route_to(a_dest).map(|(_, h)| h), Some(0));
@@ -89,7 +98,10 @@ async fn transport_node_forwards_announces() {
 #[tokio::test]
 async fn link_forwards_through_transport_node() {
     let hub = Endpoint::new(PrivateIdentity::from_secret_bytes(&[9u8; 64]));
-    let addr = hub.listen_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = hub
+        .listen_tcp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
     hub.enable_routing();
 
     // Responder B: register + announce, echo inbound streams.
@@ -151,14 +163,21 @@ async fn link_forwards_through_transport_node() {
         .await
         .expect("echo within timeout")
         .expect("read ok");
-    assert_eq!(&buf[..n], b"echo:ping-fwd", "byte stream traverses the transport node");
+    assert_eq!(
+        &buf[..n],
+        b"echo:ping-fwd",
+        "byte stream traverses the transport node"
+    );
 }
 
 #[tokio::test]
 async fn hub_reaches_two_leaves_over_two_interfaces() {
     let hub_id = PrivateIdentity::from_secret_bytes(&[1u8; 64]);
     let hub = Endpoint::new(hub_id);
-    let addr = hub.listen_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = hub
+        .listen_tcp("127.0.0.1:0".parse().unwrap())
+        .await
+        .unwrap();
 
     // Two leaves, each dialing the hub → two interfaces on the hub.
     spawn_leaf([2u8; 64], "a", addr).await;
@@ -190,6 +209,10 @@ async fn hub_reaches_two_leaves_over_two_interfaces() {
             .expect("read within timeout")
             .expect("read ok");
         let got = String::from_utf8_lossy(&buf[..n]);
-        assert_eq!(got, format!("echo:{msg}"), "each leaf echoes its own stream");
+        assert_eq!(
+            got,
+            format!("echo:{msg}"),
+            "each leaf echoes its own stream"
+        );
     }
 }

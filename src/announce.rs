@@ -34,9 +34,7 @@
 use crate::destination::destination_hash;
 use crate::hash::{AddressHash, NameHash};
 use crate::identity::{IDENTITY_LEN, Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
-use crate::packet::{
-    DestinationType, HeaderType, Packet, PacketType, Propagation,
-};
+use crate::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation};
 use crate::{Error, Result};
 
 /// Length of the random hash carried in an announce.
@@ -121,21 +119,24 @@ impl Announce {
         let name_hash = NameHash::from_slice(&p[off..]).ok_or(Error::Truncated)?;
         off += crate::hash::NAME_HASH_LEN;
 
-        let rand_hash: [u8; RAND_HASH_LEN] =
-            p[off..off + RAND_HASH_LEN].try_into().expect("checked length");
+        let rand_hash: [u8; RAND_HASH_LEN] = p[off..off + RAND_HASH_LEN]
+            .try_into()
+            .expect("checked length");
         off += RAND_HASH_LEN;
 
         let ratchet = if ratcheted {
-            let r: [u8; RATCHET_LEN] =
-                p[off..off + RATCHET_LEN].try_into().expect("checked length");
+            let r: [u8; RATCHET_LEN] = p[off..off + RATCHET_LEN]
+                .try_into()
+                .expect("checked length");
             off += RATCHET_LEN;
             Some(r)
         } else {
             None
         };
 
-        let signature: [u8; SIGNATURE_LEN] =
-            p[off..off + SIGNATURE_LEN].try_into().expect("checked length");
+        let signature: [u8; SIGNATURE_LEN] = p[off..off + SIGNATURE_LEN]
+            .try_into()
+            .expect("checked length");
         off += SIGNATURE_LEN;
 
         let app_data = p[off..].to_vec();

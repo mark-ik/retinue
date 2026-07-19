@@ -41,25 +41,30 @@ async fn reliable_request_response_end_to_end() {
     let server_task = tokio::spawn({
         let server = Arc::clone(&server);
         async move {
-        let mut stream = server.accept_reliable(client_pub).await.unwrap();
-        let mut req = Vec::new();
-        stream.read_to_end(&mut req).await.unwrap();
-        let mut resp = b"got ".to_vec();
-        resp.extend_from_slice(&(req.len() as u32).to_le_bytes());
-        stream.write_all(&resp).await.unwrap();
-        stream.shutdown().await.unwrap();
-        req
+            let mut stream = server.accept_reliable(client_pub).await.unwrap();
+            let mut req = Vec::new();
+            stream.read_to_end(&mut req).await.unwrap();
+            let mut resp = b"got ".to_vec();
+            resp.extend_from_slice(&(req.len() as u32).to_le_bytes());
+            stream.write_all(&resp).await.unwrap();
+            stream.shutdown().await.unwrap();
+            req
         }
     });
 
     // Client: open the reliable link, send a multi-packet payload, half-close, read the reply.
     let server_pub = *server_id.public();
-    let mut stream = tokio::time::timeout(Duration::from_secs(10), client.open_reliable(dest, server_pub))
-        .await
-        .expect("link opens within timeout")
-        .expect("reliable stream");
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(10),
+        client.open_reliable(dest, server_pub),
+    )
+    .await
+    .expect("link opens within timeout")
+    .expect("reliable stream");
 
-    let payload: Vec<u8> = (0..3000u32).map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8).collect();
+    let payload: Vec<u8> = (0..3000u32)
+        .map(|i| (i.wrapping_mul(7).wrapping_add(3)) as u8)
+        .collect();
     stream.write_all(&payload).await.unwrap();
     stream.shutdown().await.unwrap(); // half-close: done sending, still reading
 
@@ -73,7 +78,10 @@ async fn reliable_request_response_end_to_end() {
         .await
         .expect("server finished")
         .unwrap();
-    assert_eq!(got_req, payload, "server received the exact multi-packet request");
+    assert_eq!(
+        got_req, payload,
+        "server received the exact multi-packet request"
+    );
 
     let mut expected = b"got ".to_vec();
     expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());

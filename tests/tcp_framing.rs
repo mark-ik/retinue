@@ -23,7 +23,11 @@ fn we_can_deframe_a_real_rns_tcp_stream() {
     let frames = d.push(&stream);
 
     // RNS sent an interface-chatter packet plus our two announces.
-    assert!(frames.len() >= 2, "expected several frames, got {}", frames.len());
+    assert!(
+        frames.len() >= 2,
+        "expected several frames, got {}",
+        frames.len()
+    );
 
     let announces: Vec<Announce> = frames
         .iter()
@@ -34,7 +38,10 @@ fn we_can_deframe_a_real_rns_tcp_stream() {
 
     assert_eq!(announces.len(), 2, "expected two announces in the stream");
     for a in &announces {
-        assert_eq!(a.destination.to_string(), "a8725a7e212dace39e9f99a8ac5da28c");
+        assert_eq!(
+            a.destination.to_string(),
+            "a8725a7e212dace39e9f99a8ac5da28c"
+        );
     }
     // One of them carries the adversarial app_data full of HDLC special bytes.
     assert!(

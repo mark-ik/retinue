@@ -13,7 +13,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ep = Endpoint::new(id);
     let addr = ep.listen_tcp(([127, 0, 0, 1], port).into()).await?;
     ep.enable_routing();
-    println!("TRANSPORT_NODE_UP {} on {}", ep.identity().hash(), addr.port());
+    println!(
+        "TRANSPORT_NODE_UP {} on {}",
+        ep.identity().hash(),
+        addr.port()
+    );
     // Route forever (until killed). The router runs in background tasks.
     loop {
         tokio::time::sleep(Duration::from_secs(3600)).await;

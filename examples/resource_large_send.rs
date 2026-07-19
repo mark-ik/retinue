@@ -5,9 +5,9 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{TcpInterface, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
-use retinue::link::{LinkMode, LinkTrailer, PendingLink, CTX_RESOURCE, CTX_RESOURCE_ADV};
+use retinue::iface::tcp::{TcpInterface, TcpInterfaceListener};
+use retinue::link::{CTX_RESOURCE, CTX_RESOURCE_ADV, LinkMode, LinkTrailer, PendingLink};
 use retinue::packet::{Packet, PacketType};
 use retinue::resource::{self, Advertisement, MAPHASH_LEN};
 
@@ -16,13 +16,19 @@ const EPHEMERAL_SEED: [u8; 64] = [0x33; 64];
 const ADV_HASHES: usize = 74; // RNS HASHMAP_MAX_LEN
 
 fn iv(n: u8) -> [u8; 16] {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut v = [0u8; 16];
     v[..8].copy_from_slice(&t[..8]);
     v[15] = n;
     v
 }
-async fn send(i: &mut TcpInterface, p: &Packet) { i.send(p).await.expect("send"); }
+async fn send(i: &mut TcpInterface, p: &Packet) {
+    i.send(p).await.expect("send");
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -33,12 +39,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["recv"]).destination_hash(&peer);
     let (pending, request) = PendingLink::open(
-        dest, peer, &EPHEMERAL_SEED, LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        dest,
+        peer,
+        &EPHEMERAL_SEED,
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
     send(&mut iface, &request).await;
     let link = loop {
         match tokio::time::timeout(Duration::from_secs(10), iface.recv()).await {
-            Err(_) => { println!("TIMEOUT"); return Ok(()); }
+            Err(_) => {
+                println!("TIMEOUT");
+                return Ok(());
+            }
             Ok(Err(_)) => continue,
             Ok(Ok(p)) if p.packet_type == PacketType::Proof => break pending.prove(&p)?,
             Ok(Ok(_)) => continue,
@@ -48,7 +63,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tokio::time::sleep(Duration::from_millis(400)).await;
 
     // A 40 KB uncompressed resource: 87 parts.
-    let data: Vec<u8> = (0..40000u32).map(|i| (i.wrapping_mul(131).wrapping_add(7)) as u8).collect();
+    let data: Vec<u8> = (0..40000u32)
+        .map(|i| (i.wrapping_mul(131).wrapping_add(7)) as u8)
+        .collect();
     let random_hash = [0xA5, 0x5A, 0x12, 0x34];
     let token = link.seal(&resource::content(&data, &random_hash), &iv(2));
     let (full_adv, parts) = resource::advertise(&data, &token, random_hash, false);
@@ -57,7 +74,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // so we can identify what an exhausted-flag request references.
     for i in [72usize, 73, 74, 75, 86] {
         if let Some(p) = parts.get(i) {
-            println!("MAPHASH[{i}] {}", hex::encode(resource::map_hash(p, &random_hash)));
+            println!(
+                "MAPHASH[{i}] {}",
+                hex::encode(resource::map_hash(p, &random_hash))
+            );
         }
     }
     println!("RESHASH {}", hex::encode(&full_adv.resource_hash));
@@ -72,8 +92,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut adv = full_adv.clone();
     adv.hashmap.truncate(ADV_HASHES * MAPHASH_LEN);
     let _ = Advertisement::parse(&adv.pack()); // sanity
-    send(&mut iface, &link.sealed_packet(CTX_RESOURCE_ADV, &adv.pack(), &iv(3))).await;
-    println!("SENT_ADV parts={} hashmap_parts={}", adv.parts, adv.hashmap_parts());
+    send(
+        &mut iface,
+        &link.sealed_packet(CTX_RESOURCE_ADV, &adv.pack(), &iv(3)),
+    )
+    .await;
+    println!(
+        "SENT_ADV parts={} hashmap_parts={}",
+        adv.parts,
+        adv.hashmap_parts()
+    );
 
     let mut ivc = 10u8;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
@@ -92,8 +120,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if flag == 0xff {
                 println!("REQ0xFF full={}", hex::encode(&pt));
             }
-            println!("REQ flag=0x{:02x} hashes={} tail={}", flag, hashes.len() / 4,
-                hex::encode(&pt[1 + 32..(1 + 32 + 16).min(pt.len())]));
+            println!(
+                "REQ flag=0x{:02x} hashes={} tail={}",
+                flag,
+                hashes.len() / 4,
+                hex::encode(&pt[1 + 32..(1 + 32 + 16).min(pt.len())])
+            );
             // Serve any requested parts we recognise.
             let mut sent = 0;
             for mh in hashes.chunks(4) {
@@ -107,7 +139,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             println!("  served {sent}");
         } else {
-            println!("CTX 0x{:02x} {} bytes", packet.context, packet.payload.len());
+            println!(
+                "CTX 0x{:02x} {} bytes",
+                packet.context,
+                packet.payload.len()
+            );
         }
     }
     println!("DONE");

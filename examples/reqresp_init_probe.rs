@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::destination::DestinationName;
 use retinue::hash::AddressHash;
-use retinue::iface::tcp::{TcpInterface, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{TcpInterface, TcpInterfaceListener};
 use retinue::link::{Inbound, LinkMode, LinkTrailer, PendingLink};
 use retinue::packet::{Packet, PacketType};
 
@@ -15,7 +15,11 @@ const DEST_SEED: [u8; 64] = [0x11; 64];
 const EPHEMERAL_SEED: [u8; 64] = [0x33; 64];
 
 fn iv(n: u8) -> [u8; 16] {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut v = [0u8; 16];
     v[..8].copy_from_slice(&t[..8]);
     v[15] = n;
@@ -25,7 +29,10 @@ fn iv(n: u8) -> [u8; 16] {
 /// Pack `[time_f64, path_hash(16), data]` the way RNS does: fixarray(3), float64, and
 /// bin8-tagged byte strings.
 fn pack_request(path: &[u8], data: &[u8]) -> Vec<u8> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     let path_hash = AddressHash::of(path);
     let mut out = vec![0x93, 0xcb];
     out.extend_from_slice(&now.to_be_bytes());
@@ -51,14 +58,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["reqresp"]).destination_hash(&peer);
     let (pending, request) = PendingLink::open(
-        dest, peer, &EPHEMERAL_SEED, LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        dest,
+        peer,
+        &EPHEMERAL_SEED,
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
     send(&mut iface, &request).await;
 
     // Establish.
     let link = loop {
         match tokio::time::timeout(Duration::from_secs(10), iface.recv()).await {
-            Err(_) => { println!("TIMEOUT"); return Ok(()); }
+            Err(_) => {
+                println!("TIMEOUT");
+                return Ok(());
+            }
             Ok(Err(_)) => continue,
             Ok(Ok(p)) if p.packet_type == PacketType::Proof => break pending.prove(&p)?,
             Ok(Ok(_)) => continue,

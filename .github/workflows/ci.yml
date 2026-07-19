@@ -15,7 +15,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
+
+      # Default rustfmt, enforced for consistency (no custom style).
+      - name: Format
+        run: cargo fmt --check
 
       # The default build is the tokio endpoint plus everything below it.
       - name: Build (all targets)

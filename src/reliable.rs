@@ -54,7 +54,13 @@ impl ReliableChannel {
     /// we receive with it); `peer` is the identity we validate the peer's proofs against —
     /// for an initiator, the destination's identity from its announce.
     pub fn new(link: Link, prover: PrivateIdentity, peer: Identity) -> Self {
-        Self { link, buffer: Buffer::new(), prover, peer, sent: HashMap::new() }
+        Self {
+            link,
+            buffer: Buffer::new(),
+            prover,
+            peer,
+            sent: HashMap::new(),
+        }
     }
 
     /// Queue application bytes for reliable, in-order delivery.
@@ -93,7 +99,9 @@ impl ReliableChannel {
         // Prove only what we could accept. When the reorder buffer is full, `handle` returns
         // false: we withhold the proof so the sender retransmits later, rather than proving a
         // frame we dropped (which would lose it) — this is what bounds the reorder buffer.
-        self.buffer.handle(envelope).then(|| self.link.data_proof(packet, &self.prover))
+        self.buffer
+            .handle(envelope)
+            .then(|| self.link.data_proof(packet, &self.prover))
     }
 
     /// Feed an inbound proof: if it validates against the peer's identity and names a packet
@@ -147,7 +155,10 @@ mod tests {
     fn pair() -> (ReliableChannel, ReliableChannel) {
         let server_id = PrivateIdentity::from_secret_bytes(&[0x22; 64]);
         let client_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
-        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let trailer = LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        };
         let dest = DestinationName::new("retinue", ["test"]).destination_hash(server_id.public());
         let (pending, request) = PendingLink::open(dest, *server_id.public(), &[0x33; 64], trailer);
         let (responder_link, proof) = accept(&request, &server_id, &[0x99; 64], trailer).unwrap();
@@ -163,12 +174,18 @@ mod tests {
     /// clock. Asserts exact, in-order reconstruction and that the server saw eof.
     fn drive_over_loss(drop_per_mille: u32, max_delay: u64, seed: u64, len: usize) {
         let (mut client, mut server) = pair();
-        let payload: Vec<u8> = (0..len as u32).map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8).collect();
+        let payload: Vec<u8> = (0..len as u32)
+            .map(|i| (i.wrapping_mul(31).wrapping_add(7)) as u8)
+            .collect();
         client.write(&payload);
         client.finish();
 
-        let mut fwd = LossModel::new(seed).drop_per_mille(drop_per_mille).max_delay_ms(max_delay);
-        let mut bwd = LossModel::new(seed ^ 0xABCD).drop_per_mille(drop_per_mille).max_delay_ms(max_delay);
+        let mut fwd = LossModel::new(seed)
+            .drop_per_mille(drop_per_mille)
+            .max_delay_ms(max_delay);
+        let mut bwd = LossModel::new(seed ^ 0xABCD)
+            .drop_per_mille(drop_per_mille)
+            .max_delay_ms(max_delay);
 
         let mut to_server: Vec<(u64, Packet)> = Vec::new();
         let mut to_client: Vec<(u64, Packet)> = Vec::new();
@@ -213,7 +230,10 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(got, payload, "reliable stream must reconstruct exactly over loss");
+        assert_eq!(
+            got, payload,
+            "reliable stream must reconstruct exactly over loss"
+        );
         assert!(server.recv_finished(), "server saw the client's eof");
     }
 
@@ -257,7 +277,10 @@ mod tests {
         // A proof from a stranger's identity over the right hash: rejected (wrong signer).
         let stranger = PrivateIdentity::from_secret_bytes(&[0x55; 64]);
         let forged = client.link.data_proof(&sent[0], &stranger);
-        assert!(!client.on_proof(&forged, 1), "wrong-identity proof rejected");
+        assert!(
+            !client.on_proof(&forged, 1),
+            "wrong-identity proof rejected"
+        );
         assert!(!client.send_idle(), "the packet is still outstanding");
 
         // The genuine proof (server signs with its identity) does release it.

@@ -57,7 +57,10 @@ fn we_establish_a_link_and_decrypt_rns_link_data() {
         destination_hash(),
         peer_identity(),
         &hex64(EPHEMERAL_SEED),
-        LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
 
     // Sanity: the request we build must yield the link id RNS agreed on.
@@ -85,7 +88,10 @@ fn a_tampered_proof_is_rejected() {
         destination_hash(),
         peer_identity(),
         &hex64(EPHEMERAL_SEED),
-        LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
 
     let mut raw = fixture("link_proof.bin");

@@ -38,15 +38,15 @@
 
 pub mod address_book;
 pub mod announce;
+pub mod channel;
 pub mod destination;
 #[cfg(feature = "tokio")]
 pub mod endpoint;
-pub mod channel;
-pub mod lossy;
 pub mod hash;
 pub mod identity;
 pub mod iface;
 pub mod link;
+pub mod lossy;
 pub mod packet;
 pub mod path;
 pub mod reliable;

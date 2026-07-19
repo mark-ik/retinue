@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use retinue::announce::{self, RAND_HASH_LEN};
 use retinue::destination::DestinationName;
-use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
 use retinue::identity::PrivateIdentity;
+use retinue::iface::tcp::{RecvError, TcpInterface, TcpInterfaceListener};
 use retinue::link::{self, Inbound, LinkMode, LinkTrailer, PendingLink};
 use retinue::packet::{Packet, PacketType};
 use retinue::request::{Request, Response};
@@ -24,17 +24,28 @@ const OUR_SEED: [u8; 64] = [0x55; 64];
 const OUR_EPHEMERAL: [u8; 64] = [0x77; 64];
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
 }
 fn iv(n: u8) -> [u8; 16] {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut v = [0u8; 16];
     v[..8].copy_from_slice(&t[..8]);
     v[15] = n;
     v
 }
 fn rh() -> [u8; RAND_HASH_LEN] {
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos().to_le_bytes();
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_le_bytes();
     let mut o = [0u8; RAND_HASH_LEN];
     o.copy_from_slice(&n[..RAND_HASH_LEN]);
     o
@@ -53,19 +64,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let our_id = PrivateIdentity::from_secret_bytes(&OUR_SEED);
     let our_name = DestinationName::new("retinue", ["svc"]);
     let our_dest = our_name.destination_hash(our_id.public());
-    send(&mut iface, &announce::build(&our_id, our_name.name_hash(), &rh(), None, b"svc")).await;
+    send(
+        &mut iface,
+        &announce::build(&our_id, our_name.name_hash(), &rh(), None, b"svc"),
+    )
+    .await;
 
     // --- Direction 1: retinue -> RNS request.
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["reqresp"]).destination_hash(&peer);
     let (pending, request) = PendingLink::open(
-        dest, peer, &EPHEMERAL_SEED, LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+        dest,
+        peer,
+        &EPHEMERAL_SEED,
+        LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        },
     );
     send(&mut iface, &request).await;
 
     let out_link = loop {
         match tokio::time::timeout(Duration::from_secs(10), iface.recv()).await {
-            Err(_) => { println!("TIMEOUT proof"); return Ok(()); }
+            Err(_) => {
+                println!("TIMEOUT proof");
+                return Ok(());
+            }
             Ok(Err(_)) => continue,
             Ok(Ok(p)) if p.packet_type == PacketType::Proof => break pending.prove(&p)?,
             Ok(Ok(_)) => continue,
@@ -114,10 +138,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Direction 2: RNS opens a link to our /svc destination and sends a request.
         match &resp_link {
-            None if packet.packet_type == PacketType::LinkRequest && packet.destination == our_dest => {
+            None if packet.packet_type == PacketType::LinkRequest
+                && packet.destination == our_dest =>
+            {
                 let (l, proof) = link::accept(
-                    &packet, &our_id, &OUR_EPHEMERAL,
-                    LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 },
+                    &packet,
+                    &our_id,
+                    &OUR_EPHEMERAL,
+                    LinkTrailer {
+                        mode: LinkMode::Aes256Cbc,
+                        mtu: 500,
+                    },
                 )?;
                 send(&mut iface, &proof).await;
                 resp_link = Some(l);
