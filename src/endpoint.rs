@@ -50,6 +50,11 @@ const DUPLEX_BUF: usize = 64 * 1024;
 /// active reliable link; a production build would pause it when the link is fully idle.
 const RELIABLE_TICK_MS: u64 = 50;
 
+/// How long [`Endpoint::open`] waits for a link proof before giving up. Multi-hop setup can
+/// be slow, so this is generous; it exists to bound a setup that will otherwise never
+/// complete (a peer that never proves) rather than to hang the caller forever.
+const LINK_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Maximum hops an announce or packet may travel before a transport node drops it. RNS's
 /// default `m` (`PATHFINDER_M`).
 const MAX_HOPS: u8 = 128;
@@ -554,14 +559,15 @@ impl Endpoint {
             LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: crate::packet::MTU as u32 },
         );
 
+        let link_id = pending.link_id();
         let (tx, rx) = oneshot::channel();
-        self.shared.pending.lock().unwrap().insert(pending.link_id(), tx);
+        self.shared.pending.lock().unwrap().insert(link_id, tx);
         // Stash the pending link so the router can prove it.
-        self.shared
-            .pending_links
-            .lock()
-            .unwrap()
-            .insert(pending.link_id(), pending);
+        self.shared.pending_links.lock().unwrap().insert(link_id, pending);
+        // If setup does not complete — it times out below, or the caller drops this future —
+        // remove both entries on the way out so a failed setup never leaks router state.
+        let mut guard = PendingGuard { shared: Arc::clone(&self.shared), link_id, armed: true };
+
         // Send the request toward the destination: on the interface the path table names
         // (addressed via its transport node if remote), or broadcast if we have no route yet
         // (a directly-connected peer).
@@ -570,8 +576,14 @@ impl Endpoint {
             None => self.shared.broadcast(request),
         }
 
-        rx.await
-            .map_err(|_| io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped"))
+        match tokio::time::timeout(LINK_SETUP_TIMEOUT, rx).await {
+            Ok(Ok(established)) => {
+                guard.armed = false; // the router already removed both entries on success
+                Ok(established)
+            }
+            Ok(Err(_)) => Err(io::Error::new(io::ErrorKind::ConnectionReset, "link setup dropped")),
+            Err(_) => Err(io::Error::new(io::ErrorKind::TimedOut, "link setup timed out")),
+        }
     }
 
     /// Wait for the next inbound link, surfaced as a stream.
@@ -746,11 +758,19 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         }
         PacketType::Proof => {
             // Complete a pending outbound link, binding it to the interface it came in on.
-            let maybe = shared.pending_links.lock().unwrap().remove(&pkt.destination);
-            if let Some(pending) = maybe {
-                if let Ok(link) = pending.prove(&pkt)
-                    && let Some(tx) = shared.pending.lock().unwrap().remove(&pkt.destination)
-                {
+            // Validate the proof against the pending link BEFORE removing it: a forged proof
+            // addressed to a real pending link id must not be able to evict it and strand the
+            // genuine proof that follows. Only a proof that actually verifies removes it.
+            let proved = {
+                let mut pend = shared.pending_links.lock().unwrap();
+                let link = pend.get(&pkt.destination).and_then(|p| p.prove(&pkt).ok());
+                if link.is_some() {
+                    pend.remove(&pkt.destination);
+                }
+                link
+            };
+            if let Some(link) = proved {
+                if let Some(tx) = shared.pending.lock().unwrap().remove(&pkt.destination) {
                     let _ = tx.send((link, iface));
                 }
             } else {
@@ -980,6 +1000,25 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
     });
 
     LinkStream { inner: mine, link_id }
+}
+
+/// Removes a link's pending-setup state — the `pending` waker and the `pending_links`
+/// half-open link — if setup does not complete: a timeout, or the caller dropping the `open`
+/// future. Without it, a setup that never receives its proof leaks both entries. Disarmed
+/// once the proof establishes the link, since the router has already removed them.
+struct PendingGuard {
+    shared: Arc<Shared>,
+    link_id: AddressHash,
+    armed: bool,
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.shared.pending.lock().unwrap().remove(&self.link_id);
+            self.shared.pending_links.lock().unwrap().remove(&self.link_id);
+        }
+    }
 }
 
 /// Fill `buf` with cryptographically secure OS randomness. Link ephemeral secrets and AES
