@@ -1,0 +1,34 @@
+# cargo-deny configuration — the license gate.
+#
+# The load-bearing rule for retinue is that it and its whole dependency tree stay
+# permissively licensed (MIT / Apache-2.0 and friends). A single copyleft dependency here
+# would force any firmware that statically links retinue to become GPLv3, which is exactly
+# the boundary the embedded strategy depends on keeping clean. See
+# design_docs/2026-07-19_modem_embedded_and_meshtastic_research.md.
+#
+# This file drives `cargo deny check licenses` in CI: any license not on the allow list
+# below — every GPL/LGPL/AGPL variant, MPL, etc. — fails the build, so the boundary cannot
+# erode by accident (including through a transitive dependency).
+
+[graph]
+# Check optional dependencies too (tokio, getrandom, bzip2), so nothing hides behind a
+# feature flag.
+all-features = true
+
+[licenses]
+version = 2
+# Exactly the permissive licenses currently in the tree — kept tight on purpose. A new
+# dependency that introduces any other license fails this check, forcing a review: a
+# permissive one (ISC, BSD-2-Clause, Zlib, ...) is a one-line, reviewed addition here; a
+# copyleft one (any GPL/LGPL/AGPL, MPL, ...) must never be added, since it would relicense
+# every firmware image that links retinue. bzip2-1.0.6 is the permissive bzlib license.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "bzip2-1.0.6",
+]
+confidence-threshold = 0.9

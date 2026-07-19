@@ -42,6 +42,17 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  # Enforce that retinue's whole dependency tree stays permissively licensed. A copyleft
+  # dependency would force any firmware that links retinue to GPLv3 (see deny.toml and the
+  # embedded/licensing research note), so this gate fails the build if one ever enters.
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
 # The RNS interoperability oracle (oracle/) needs a Python venv and is not run here;
 # the bytes it produced are checked in under tests/fixtures/, so the gold tests that
 # pin the wire run in CI against those fixtures with no Python.
