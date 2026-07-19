@@ -55,6 +55,12 @@ const RELIABLE_TICK_MS: u64 = 50;
 /// complete (a peer that never proves) rather than to hang the caller forever.
 const LINK_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// Depth of the router's inbound queue. Bounded so a flooding peer cannot make the endpoint
+/// buffer packets without limit: a TCP reader awaits when it is full (back-pressuring the
+/// socket, so the flow control reaches the peer), and the [`InterfaceSink::deliver`] seam,
+/// which cannot await, drops instead.
+const ROUTER_QUEUE: usize = 1024;
+
 /// Maximum hops an announce or packet may travel before a transport node drops it. RNS's
 /// default `m` (`PATHFINDER_M`).
 const MAX_HOPS: u8 = 128;
@@ -138,7 +144,7 @@ pub type InterfaceId = u32;
 pub struct Interface {
     id: InterfaceId,
     outbound: mpsc::UnboundedReceiver<Packet>,
-    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
+    router_tx: mpsc::Sender<(InterfaceId, Packet)>,
 }
 
 impl Interface {
@@ -178,14 +184,14 @@ impl Interface {
 #[derive(Clone)]
 pub struct InterfaceSink {
     id: InterfaceId,
-    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
+    router_tx: mpsc::Sender<(InterfaceId, Packet)>,
 }
 
 impl InterfaceSink {
     /// Deliver a received packet into the router. Returns `false` if the endpoint
     /// has been dropped.
     pub fn deliver(&self, pkt: Packet) -> bool {
-        self.router_tx.send((self.id, pkt)).is_ok()
+        self.router_tx.try_send((self.id, pkt)).is_ok()
     }
 }
 
@@ -249,7 +255,7 @@ struct Shared {
     /// Every attached interface. Announces broadcast to all; link traffic targets one.
     interfaces: Mutex<Vec<Iface>>,
     /// The router's inbound channel: every interface's reader feeds `(interface, packet)`.
-    router_tx: mpsc::UnboundedSender<(InterfaceId, Packet)>,
+    router_tx: mpsc::Sender<(InterfaceId, Packet)>,
     /// Inbound accepted links (stream + destination), surfaced to `accept`.
     accepted_tx: mpsc::UnboundedSender<Accepted>,
     /// Inbound accepted reliable links, surfaced to `accept_reliable` (which binds the
@@ -368,7 +374,7 @@ pub struct Endpoint {
 impl Endpoint {
     /// Create an endpoint with no interfaces yet, and start its router.
     pub fn new(identity: PrivateIdentity) -> Self {
-        let (router_tx, mut router_rx) = mpsc::unbounded_channel::<(InterfaceId, Packet)>();
+        let (router_tx, mut router_rx) = mpsc::channel::<(InterfaceId, Packet)>(ROUTER_QUEUE);
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
         let (reliable_accepted_tx, reliable_accepted_rx) = mpsc::unbounded_channel::<AcceptedLink>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
@@ -661,8 +667,11 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
                 Ok(n) => n,
             };
             for raw in deframer.push(&buf[..n]) {
+                // Await on a full router queue rather than dropping: this back-pressures the
+                // socket read, so TCP flow control slows a flooding peer. `send` errors only
+                // when the router is gone, which means the endpoint is shutting down.
                 if let Ok(pkt) = Packet::decode(&raw)
-                    && router_tx.send((id, pkt)).is_err()
+                    && router_tx.send((id, pkt)).await.is_err()
                 {
                     return;
                 }

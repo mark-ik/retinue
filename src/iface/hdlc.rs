@@ -34,6 +34,11 @@ pub const ESC: u8 = 0x7D;
 /// An escaped byte is XORed with this.
 pub const ESC_MASK: u8 = 0x20;
 
+/// Largest deframed frame the [`Deframer`] will assemble before discarding it. A valid
+/// Reticulum packet is at most the wire MTU (the decoder rejects anything larger), so this
+/// caps how much a peer can make us buffer by withholding the closing flag.
+const MAX_FRAME: usize = crate::packet::MTU;
+
 /// Wrap a packet in a frame, escaping as needed.
 pub fn frame(packet: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(packet.len() + 2);
@@ -97,6 +102,13 @@ impl Deframer {
             } else {
                 self.buf.push(b);
             }
+            // A valid Reticulum packet is at most the wire MTU, so a frame growing past it is
+            // malformed — or a peer withholding the closing flag to make us buffer without
+            // bound. Discard it and resynchronise at the next flag.
+            if self.buf.len() > MAX_FRAME {
+                self.buf.clear();
+                self.in_frame = false;
+            }
         }
         frames
     }
@@ -154,5 +166,21 @@ mod tests {
         let mut stream = vec![0xAA, 0xBB];
         stream.extend(frame(b"ok"));
         assert_eq!(d.push(&stream), vec![b"ok".to_vec()]);
+    }
+
+    /// A peer that opens a frame and streams bytes without ever sending the closing flag must
+    /// not make us buffer without bound. The over-length frame is discarded, and a normal
+    /// frame after the next flag still parses — the deframer resynchronises.
+    #[test]
+    fn an_unbounded_frame_is_discarded_and_resynchronises() {
+        let mut d = Deframer::new();
+        // Open a frame, then feed well past MAX_FRAME with no closing flag.
+        d.push(&[FLAG]);
+        let flood = vec![0x00u8; MAX_FRAME * 4];
+        assert!(d.push(&flood).is_empty(), "no frame completes");
+        // The internal buffer stayed bounded rather than holding all the flood.
+        assert!(d.buf.len() <= MAX_FRAME, "buffer is capped at MAX_FRAME");
+        // A genuine frame after the next flag is delivered intact.
+        assert_eq!(d.push(&frame(b"after")), vec![b"after".to_vec()]);
     }
 }

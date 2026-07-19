@@ -66,6 +66,12 @@ const FAST_RATE_THRESHOLD: u32 = 10;
 /// real clock; a counter in tests).
 pub const DEFAULT_RETX_TIMEOUT: u64 = 4;
 
+/// The most out-of-order future envelopes the receiver will hold at once. A well-behaved
+/// sender keeps at most a window's worth in flight (`WINDOW_MAX` = 48), so this is generous
+/// headroom; its purpose is to bound the reorder buffer against a peer that streams only
+/// future sequences and never fills the gap. See [`Channel::handle`].
+pub const REORDER_MAX: usize = 256;
+
 /// RNS `Buffer`'s stream-frame message type: a stream chunk rides a [`Channel`]
 /// envelope under this msgtype (RNS `StreamDataMessage.MSGTYPE`). Captured black-box
 /// (`buffer_wire.json`).
@@ -277,10 +283,14 @@ impl Channel {
 
     /// Process a received envelope, delivering it or buffering it for reordering.
     ///
-    /// The driver proves the underlying packet at the link layer regardless (an
-    /// unproven sender retransmits, and the receiver must re-prove duplicates), so this
-    /// never needs to signal a proof — it only orders delivery.
-    pub fn handle(&mut self, envelope: Envelope) {
+    /// Returns whether the driver should prove (acknowledge) the underlying packet. It
+    /// proves in-order and buffered frames, and re-proves duplicates (an unproven sender
+    /// retransmits). It withholds the proof only when the reorder buffer is full and this is
+    /// a new gap-filler: dropping a *proved* frame would lose it forever, so instead we leave
+    /// it unproven and let the sender retransmit once the gap ahead of it clears. This bounds
+    /// the reorder buffer against a peer that streams only future sequences.
+    #[must_use]
+    pub fn handle(&mut self, envelope: Envelope) -> bool {
         let ahead = envelope.sequence.wrapping_sub(self.recv_next);
         if ahead == 0 {
             self.inbox.push_back(envelope.payload);
@@ -290,12 +300,20 @@ impl Channel {
                 self.inbox.push_back(next);
                 self.recv_next = self.recv_next.wrapping_add(1);
             }
+            true
         } else if (ahead as u32) < SEQ_MODULUS / 2 {
-            // A future sequence within the forward half of the space: hold it.
+            // A future sequence within the forward half of the space: hold it, unless the
+            // reorder buffer is full of other gap-fillers and this is a new one.
+            if self.reorder.len() >= REORDER_MAX && !self.reorder.contains_key(&envelope.sequence) {
+                return false;
+            }
             self.reorder.entry(envelope.sequence).or_insert(envelope.payload);
+            true
+        } else {
+            // Behind `recv_next`: an already-delivered duplicate. Drop the payload but prove
+            // it — the sender retransmitted because our earlier proof did not arrive.
+            true
         }
-        // Otherwise the sequence is behind `recv_next` (an already-delivered
-        // duplicate); drop the payload. The driver still proves the packet.
     }
 
     /// The next in-order application payload, if one is ready.
@@ -501,9 +519,11 @@ impl Buffer {
         self.channel.poll_transmit(now)
     }
 
-    /// Feed a received envelope in — see [`Channel::handle`].
-    pub fn handle(&mut self, envelope: Envelope) {
-        self.channel.handle(envelope);
+    /// Feed a received envelope in — see [`Channel::handle`]. Returns whether the driver
+    /// should prove the packet (`false` when the reorder buffer is full).
+    #[must_use]
+    pub fn handle(&mut self, envelope: Envelope) -> bool {
+        self.channel.handle(envelope)
     }
 
     /// Release a proven sequence — see [`Channel::on_proof`].
@@ -565,7 +585,7 @@ mod tests {
         for now in 0..1000 {
             for e in tx.poll_transmit(now) {
                 let seq = e.sequence;
-                rx.handle(e);
+                let _ = rx.handle(e);
                 tx.on_proof(seq, now); // lossless: every packet is immediately proven
             }
             while let Some(m) = rx.recv() {
@@ -607,7 +627,7 @@ mod tests {
             for (t, e) in std::mem::take(&mut to_rx) {
                 if t <= now {
                     let seq = e.sequence;
-                    rx.handle(e);
+                    let _ = rx.handle(e);
                     if !bwd.should_drop() {
                         to_tx.push((now + 1 + bwd.delay_ms(), seq));
                     }
@@ -663,7 +683,7 @@ mod tests {
             }
             for e in tx.poll_transmit(now) {
                 let seq = e.sequence;
-                rx.handle(e);
+                let _ = rx.handle(e);
                 tx.on_proof(seq, now);
             }
             while let Some(m) = rx.recv() {
@@ -778,7 +798,7 @@ mod tests {
         // and reports eof from stream 5 — not from stream 9's earlier eof.
         let mut r5 = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 5);
         let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
-            r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+            let _ = r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
         };
         feed(&mut r5, 0, StreamFrame { stream_id: 5, eof: false, compressed: false, data: vec![1, 2, 3] });
         feed(&mut r5, 1, StreamFrame { stream_id: 9, eof: false, compressed: false, data: vec![0xAA] });
@@ -796,7 +816,7 @@ mod tests {
         // surface it, never splice compressed bytes into the stream as if they were data.
         let mut r = Buffer::with_streams(Channel::new(STREAM_MSGTYPE), 8, 0, 0);
         let feed = |r: &mut Buffer, seq: u16, f: StreamFrame| {
-            r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
+            let _ = r.handle(Envelope { msgtype: STREAM_MSGTYPE, sequence: seq, payload: f.encode() });
         };
         feed(&mut r, 0, StreamFrame { stream_id: 0, eof: false, compressed: false, data: vec![1, 2] });
         feed(&mut r, 1, StreamFrame { stream_id: 0, eof: false, compressed: true, data: vec![9, 9, 9] });
@@ -822,7 +842,7 @@ mod tests {
             }
             for e in envs {
                 let seq = e.sequence;
-                rx.handle(e);
+                let _ = rx.handle(e);
                 tx.on_proof(seq, now);
             }
             got.extend(rx.read_available());

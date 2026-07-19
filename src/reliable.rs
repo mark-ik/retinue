@@ -90,8 +90,10 @@ impl ReliableChannel {
     pub fn on_data_packet(&mut self, packet: &Packet) -> Option<Packet> {
         let plaintext = self.link.decrypt(packet).ok()?;
         let envelope = Envelope::decode(&plaintext)?;
-        self.buffer.handle(envelope);
-        Some(self.link.data_proof(packet, &self.prover))
+        // Prove only what we could accept. When the reorder buffer is full, `handle` returns
+        // false: we withhold the proof so the sender retransmits later, rather than proving a
+        // frame we dropped (which would lose it) — this is what bounds the reorder buffer.
+        self.buffer.handle(envelope).then(|| self.link.data_proof(packet, &self.prover))
     }
 
     /// Feed an inbound proof: if it validates against the peer's identity and names a packet

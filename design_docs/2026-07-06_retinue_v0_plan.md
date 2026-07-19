@@ -433,14 +433,16 @@ Two corrections to the framing above, both right:
 
 **The one piece that genuinely needs hardware.** The reference discipline names RNS
 Python (barred), Beechat (MIT, free), FreeTAK (EPL, technique-only) — and says
-nothing about **RNode_Firmware**, which is **GPLv3** and the *only* normative
-definition of the RNode serial opcodes. The manual documents RNodeInterface's config
-*options* (frequency, bandwidth, spreading factor) but not the opcodes that set them
-(they hang off `SetHardware 0x06`). No public-domain source exists. So R10's RNode
-half is the first phase where capture needs a **physical board on USB**, black-boxed
-the way `rnsd` has been — the vocabulary can't be read from anything the discipline
-allows. That is a procurement lead time and a policy note, not a coding task, and it
-is the *only* part of the milestone gated on hardware.
+nothing about **RNode_Firmware**, which is **GPLv3** and the only complete current
+normative definition of the RNode serial behavior. The manual documents
+RNodeInterface's config *options* (frequency, bandwidth, spreading factor) but not
+the current opcode payloads and state transitions that apply them. An original
+RNode hardware page publishes a legacy command table, but it does not specify the
+complete RNode 1.86 session, errors, multi-radio behavior, or long-packet behavior.
+No complete public-domain source exists. So R10's RNode half is the first phase where
+capture needs a **physical board on USB**, black-boxed the way `rnsd` has been. That
+is a procurement lead time and a policy note, not a coding task, and it is the
+*only* part of the milestone gated on hardware.
 
 **KISS, precisely** (correcting the correction): not just different constants. HDLC
 unescapes by XOR (`0x7D`, then `byte ^ 0x20`); KISS unescapes by transposition
@@ -461,8 +463,12 @@ capture under the provenance policy above, but board support is no longer an
 unknown. A separate GPLv3 Rust port of RNode Firmware is now the accepted second
 lane; a native embedded Retinue node is different again. The host capture must
 land and be tagged before the firmware port begins inspecting upstream source.
-The three lanes and their gates are separated in
-[`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md).
+After that oracle, the modem port and embedded endpoint can proceed in parallel;
+the modem is not a prerequisite for removing the host. The lanes and gates are
+separated in
+[`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md)
+and refined by
+[`2026-07-19_modem_embedded_and_meshtastic_research.md`](2026-07-19_modem_embedded_and_meshtastic_research.md).
 
 ## Decisions (2026-07-13)
 

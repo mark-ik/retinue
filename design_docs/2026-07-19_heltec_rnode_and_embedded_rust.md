@@ -3,7 +3,12 @@
 **Status:** accepted direction, 2026-07-19. This extends R10 in the v0 plan.
 The separate GPLv3 Rust RNode port is a decision; implementation has not begun.
 This document does not claim that Retinue or Rust RNode firmware currently runs
-on these boards.
+on these boards. The focused follow-up
+[`2026-07-19_modem_embedded_and_meshtastic_research.md`](2026-07-19_modem_embedded_and_meshtastic_research.md)
+corrects the sequencing: after the stock-RNode oracle, the modem port and native
+embedded Retinue are independent moves that can proceed in parallel. It also
+records the independently specified permissive option and the existing
+Meshtastic tunnel.
 
 ## Decision
 
@@ -20,10 +25,12 @@ on these boards.
    boundary. It requires an embedded profile of Retinue, not merely another
    interface driver.
 
-The order is 1, then 2, then 3. The stock RNode lane gives Retinue real radio
-evidence before the firmware port and supplies the compatibility oracle for it.
-The Rust RNode is a committed, separately licensed project, not code folded into
-Retinue. The native embedded Retinue node remains a later and distinct goal.
+System 1 comes first. It gives Retinue real radio evidence and supplies the
+compatibility oracle for both firmware efforts. Systems 2 and 3 are separate
+follow-ons and can proceed in parallel; a Rust RNode is not a prerequisite for
+native embedded Retinue. The Rust RNode is a committed, separately licensed
+project, not code folded into Retinue. Native embedded Retinue is the system
+that removes the host.
 
 For new hardware, the choices split by purpose:
 
@@ -166,11 +173,21 @@ This separation lets Retinue use stock or Rust RNodes interchangeably without
 making firmware a library dependency or changing Retinue's license. It is a
 source and build boundary, not an attempt to hide the port's derivation.
 
-Meshtastic, MeshCore, and LoRaWAN firmware solve different host and air
-protocols. They can be transports only after defining and testing a Reticulum
-encapsulation. They are not substitutes for an RNode interface by installation
-alone. A generic KISS TNC is closer, but it lacks RNode's standard radio-control
-session and would need a deployment-specific configuration path.
+An independent MIT/Apache RNode-compatible implementation is also possible in
+principle, but it is a different project discipline from this accepted GPL
+source port. It cannot translate or adapt GPL firmware code. The focused
+research note explains why that route becomes attractive if modem policy must
+be reused by MIT/Apache embedded Retinue.
+
+Meshtastic is now more than a hypothetical alternative bearer. Its official
+port registry assigns `RETICULUM_TUNNEL_APP = 76` to fragmented RNS packets,
+and the GPLv3 `RNS_Over_Meshtastic` project demonstrates the tunnel. It is much
+slower than direct RNode, adds a second routing/retry layer, and still requires a
+host Reticulum implementation attached to a Meshtastic radio. Treat it as a
+compatibility bridge, not a substitute for embedded Retinue. MeshCore and
+LoRaWAN still need their own explicit encapsulations. A generic KISS TNC is
+closer to RNode, but it lacks RNode's standard radio-control session and needs a
+deployment-specific configuration path.
 
 ### Rust-modem done condition
 
@@ -292,15 +309,19 @@ experiments, but PSRAM must not excuse unbounded protocol state.
    and its capture corpus before reading upstream firmware implementation.
 4. **On-air correctness:** satisfy the reliability, entropy, capacity, airtime,
    and route-lifetime gate; pass RNS interoperability over actual LoRa.
-5. **Rust port foundation:** create the separate GPLv3 firmware repository,
-   record RNode Firmware 1.86 provenance, then prove T114 USB CDC + SX1262
-   send/receive using Embassy and `lora-phy`.
-6. **Embedded core spike:** compile identity, packet, announce, link, and channel
-   on nRF52840 with measured memory. This decides the honest T114 profile.
+5. **Shared hardware foundation:** before GPL implementation exposure, prove the
+   permissive T114 board and SX1262 primitives from hardware documentation and
+   black-box captures if code reuse with embedded Retinue matters.
+6. **Parallel firmware spikes:** create the separate GPLv3 RNode firmware
+   repository and prove T114 USB CDC + SX1262; independently compile Retinue
+   identity, packet, announce, link, and channel on nRF52840 with measured
+   memory. Neither spike waits for the other.
 7. **V4 spike:** prove native USB, SPI, DIO interrupt, entropy, flash settings,
    PSRAM if used, and conservative radio output before choosing its executor.
 8. **Native endpoint:** replace RNode in one board with the executor-neutral node
    and direct radio shell; retain stock RNode as the interoperability peer.
+9. **Optional Meshtastic bridge:** benchmark fragmented 500-byte Reticulum
+   packets under ordinary Meshtastic traffic through a separate GPL adapter.
 
 ## Sources checked 2026-07-19
 
@@ -314,3 +335,6 @@ experiments, but PSRAM must not excuse unbounded protocol state.
 - [Espressif `esp-hal`](https://github.com/esp-rs/esp-hal)
 - [`lora-phy` documentation](https://docs.rs/lora-phy/latest/lora_phy/)
 - [RTIC target architectures](https://rtic.rs/dev/book/en/internals/targets.html)
+- [Meshtastic client API](https://meshtastic.org/docs/development/device/client-api/)
+  and [official port registry](https://github.com/meshtastic/protobufs/blob/master/meshtastic/portnums.proto)
+- [`RNS_Over_Meshtastic`](https://github.com/landandair/RNS_Over_Meshtastic)

@@ -61,6 +61,9 @@ pub use reliable::ReliableChannel;
 pub enum Error {
     /// The input ended before a required field did.
     Truncated,
+    /// A packet is larger than the wire MTU. RNS drops such packets; we reject them at the
+    /// decoder so a peer cannot hand us an over-sized buffer.
+    Oversize,
     /// A public key is not a valid point on its curve.
     BadKey,
     /// The Ed25519 signature did not verify. For an announce this means the peer does not
@@ -95,6 +98,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let s = match self {
             Self::Truncated => "input ended mid-field",
+            Self::Oversize => "packet exceeds the wire MTU",
             Self::BadKey => "invalid public key",
             Self::BadSignature => "signature did not verify",
             Self::DestinationMismatch => "destination hash does not match the announced identity",

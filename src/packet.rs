@@ -151,6 +151,11 @@ impl Packet {
         if bytes.len() < HEADER_MIN_LEN {
             return Err(Error::Truncated);
         }
+        // RNS drops over-MTU packets; reject them here so a peer cannot get us to hold an
+        // arbitrarily large buffer as a valid packet.
+        if bytes.len() > MTU {
+            return Err(Error::Oversize);
+        }
 
         let flags = bytes[0];
         let ifac = flags & 0b1000_0000 != 0;
@@ -314,6 +319,15 @@ mod tests {
     #[test]
     fn truncated_input_is_an_error() {
         assert!(Packet::decode(&[0x01, 0x00]).is_err());
+    }
+
+    #[test]
+    fn oversize_input_is_rejected() {
+        // A buffer larger than the wire MTU is not a valid packet; the decoder must reject it
+        // rather than accept an arbitrarily large payload.
+        assert!(matches!(Packet::decode(&vec![0u8; MTU + 1]), Err(Error::Oversize)));
+        // A packet exactly at the MTU still decodes.
+        assert!(Packet::decode(&vec![0u8; MTU]).is_ok());
     }
 
     #[test]
