@@ -8,6 +8,7 @@
 //! task, the driver proving receipts and releasing acked sequences, ordered bytes reaching
 //! the app, and half-close teardown (the client finishes sending, then reads the reply).
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,7 +22,9 @@ use retinue::lossy::{LossModel, connect};
 async fn reliable_request_response_end_to_end() {
     let server_id = PrivateIdentity::from_secret_bytes(&[0x22; 64]);
     let client_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
-    let server = Endpoint::new(server_id.clone());
+    // The endpoint owns its tasks and tears them down on drop, so the server must outlive the
+    // client's read. Hold it in an Arc kept alive in this scope past the exchange.
+    let server = Arc::new(Endpoint::new(server_id.clone()));
     let client = Endpoint::new(client_id.clone());
 
     let name = DestinationName::new("retinue", ["reliable"]);
@@ -30,11 +33,14 @@ async fn reliable_request_response_end_to_end() {
 
     // A clean in-memory interface between the two endpoints.
     connect(&client, &server, LossModel::new(1), LossModel::new(2));
+    // (`server` is an Arc; `connect` and the endpoint methods deref through it.)
 
     // Server: accept one reliable link (validating the client's proofs against its known
     // identity), read the whole request, reply with its length, and finish.
     let client_pub = *client_id.public();
-    let server_task = tokio::spawn(async move {
+    let server_task = tokio::spawn({
+        let server = Arc::clone(&server);
+        async move {
         let mut stream = server.accept_reliable(client_pub).await.unwrap();
         let mut req = Vec::new();
         stream.read_to_end(&mut req).await.unwrap();
@@ -43,6 +49,7 @@ async fn reliable_request_response_end_to_end() {
         stream.write_all(&resp).await.unwrap();
         stream.shutdown().await.unwrap();
         req
+        }
     });
 
     // Client: open the reliable link, send a multi-packet payload, half-close, read the reply.

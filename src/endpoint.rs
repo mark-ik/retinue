@@ -284,6 +284,11 @@ struct Shared {
     /// Links being forwarded through us (this node is a transport hop): a link id maps to the
     /// two interfaces it bridges, so a proof or link data arriving on one goes out the other.
     link_transport: Mutex<HashMap<AddressHash, (InterfaceId, InterfaceId)>>,
+    /// Abort handles for every task the endpoint spawned (the router, interface readers and
+    /// writers, TCP listeners, and link relays). [`Endpoint`]'s drop aborts them all, which is
+    /// what lets the router's `Arc<Shared>` — and thus `Shared` and every socket — be released
+    /// rather than kept alive forever by the router<->`Shared` reference cycle.
+    tasks: Mutex<Vec<tokio::task::AbortHandle>>,
 }
 
 /// A learned route to a destination.
@@ -397,10 +402,11 @@ impl Endpoint {
             seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
             iface_transport: Mutex::new(HashMap::new()),
             link_transport: Mutex::new(HashMap::new()),
+            tasks: Mutex::new(Vec::new()),
         });
 
         let router = Arc::clone(&shared);
-        tokio::spawn(async move {
+        track(&shared, async move {
             while let Some((iface, pkt)) = router_rx.recv().await {
                 route(&router, iface, pkt);
             }
@@ -457,7 +463,7 @@ impl Endpoint {
         let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
         let shared = Arc::clone(&self.shared);
-        tokio::spawn(async move {
+        track(&self.shared, async move {
             while let Ok((stream, _)) = listener.accept().await {
                 attach(&shared, stream);
             }
@@ -635,6 +641,25 @@ impl Endpoint {
             .await
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
     }
+
+    /// Stop the endpoint: abort the router, every interface reader and writer, any TCP
+    /// listeners, and every link relay, closing their sockets. [`Drop`](Self::drop) calls
+    /// this too; use it to release everything at a chosen point. Streams handed out earlier
+    /// will see their connection end. Idempotent.
+    pub fn close(&self) {
+        for handle in self.shared.tasks.lock().unwrap().drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+impl Drop for Endpoint {
+    fn drop(&mut self) {
+        // Abort every spawned task. This releases the router's `Arc<Shared>` — breaking the
+        // router<->`Shared` cycle that would otherwise keep the whole runtime alive — and
+        // stops all interface tasks, listeners, and relays so their sockets close.
+        self.close();
+    }
 }
 
 /// Attach a connected stream as an interface: register it, and spawn its writer and reader
@@ -647,7 +672,7 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
     shared.interfaces.lock().unwrap().push(Iface { id, outbound: out_tx });
 
     // Writer: frame and send this interface's outbound packets.
-    tokio::spawn(async move {
+    track(shared, async move {
         while let Some(pkt) = out_rx.recv().await {
             if write_half.write_all(&frame(&pkt.encode())).await.is_err() {
                 break;
@@ -658,7 +683,7 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
 
     // Reader: deframe, decode, hand to the router tagged with this interface.
     let router_tx = shared.router_tx.clone();
-    tokio::spawn(async move {
+    track(shared, async move {
         let mut deframer = Deframer::new();
         let mut buf = [0u8; 4096];
         loop {
@@ -880,7 +905,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
     );
 
     // Inbound: decrypted data from the router → the stream's read side.
-    tokio::spawn(async move {
+    track(shared, async move {
         while let Some(bytes) = inbound_rx.recv().await {
             if write_half.write_all(&bytes).await.is_err() {
                 break;
@@ -896,7 +921,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
     // Outbound: the stream's writes → encrypted link data packets, out the link's interface.
     let out_link = link;
     let iv_shared = Arc::clone(shared);
-    tokio::spawn(async move {
+    track(shared, async move {
         let mut buf = [0u8; WRITE_CHUNK];
         loop {
             match read_half.read(&mut buf).await {
@@ -938,7 +963,7 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
     let close_link = link.clone();
     let mut rc = ReliableChannel::new(link, shared.identity.clone(), peer);
     let drv = Arc::clone(shared);
-    tokio::spawn(async move {
+    track(shared, async move {
         let mut buf = [0u8; WRITE_CHUNK];
         let mut clock: u64 = 0;
         let mut writer_open = true; // the app's write side is still open
@@ -1009,6 +1034,17 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
     });
 
     LinkStream { inner: mine, link_id }
+}
+
+/// Spawn a task and record its abort handle on `shared`, so the endpoint's drop can cancel
+/// every task it started. Every `tokio::spawn` in this module goes through here; a task that
+/// is not tracked would outlive the endpoint.
+fn track<F>(shared: &Arc<Shared>, fut: F)
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let handle = tokio::spawn(fut);
+    shared.tasks.lock().unwrap().push(handle.abort_handle());
 }
 
 /// Removes a link's pending-setup state — the `pending` waker and the `pending_links`

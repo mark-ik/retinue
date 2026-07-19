@@ -77,3 +77,21 @@ async fn a_forged_proof_does_not_strand_link_setup() {
     assert_eq!(stream.link_id(), stream.link_id());
     assert!(injected.load(Ordering::SeqCst), "the forged proof was actually injected");
 }
+
+/// Dropping an endpoint must release its runtime. Without cancellation the router task holds
+/// `Arc<Shared>` while `Shared` holds the router sender, a cycle that keeps every task and
+/// socket alive forever. With it, dropping the endpoint aborts the router, `Shared` is freed,
+/// and an attached interface's outbound channel closes — the observable proof the cycle broke.
+#[tokio::test]
+async fn dropping_the_endpoint_releases_its_tasks() {
+    let mut iface = {
+        let ep = Endpoint::new(PrivateIdentity::from_secret_bytes(&[7u8; 64]));
+        ep.attach_interface()
+        // `ep` drops here: its Drop aborts the router, so `Shared` — and the interface's
+        // outbound sender it holds — is released.
+    };
+    let got = tokio::time::timeout(Duration::from_secs(3), iface.next_outbound())
+        .await
+        .expect("outbound closes rather than hanging");
+    assert_eq!(got, None, "the interface's outbound closes once the endpoint is dropped");
+}
