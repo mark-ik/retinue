@@ -21,7 +21,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
@@ -69,6 +69,21 @@ const MAX_HOPS: u8 = 128;
 
 /// How many recent announce packet-hashes to remember for de-duplication.
 const SEEN_ANNOUNCES: usize = 4096;
+
+/// How long a learned route stays valid without a fresh announce. A peer re-announces
+/// periodically; past this, a route to a peer that has gone silent is treated as stale and
+/// evicted rather than kept forever. Short under `cfg(test)` so the lib's own expiry test
+/// runs without waiting; integration tests link the lib without `cfg(test)` and see the real
+/// value.
+#[cfg(not(test))]
+const PATH_TTL: Duration = Duration::from_secs(60 * 30);
+#[cfg(test)]
+const PATH_TTL: Duration = Duration::from_millis(60);
+
+/// The least time between announces we will accept for the same destination. A re-announce
+/// arriving sooner is dropped (not ingested, not re-forwarded), rate-limiting an announce
+/// flood. The first announce for a destination is always accepted.
+const ANNOUNCE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// A bidirectional byte stream over a link.
 ///
@@ -271,6 +286,11 @@ struct Shared {
     /// Recently-seen announce packet hashes, for de-duplication (a ring of the last
     /// [`SEEN_ANNOUNCES`]).
     seen_announces: Mutex<(HashSet<AddressHash>, VecDeque<AddressHash>)>,
+    /// Last time an announce was accepted per destination, for rate-limiting. A fresh
+    /// re-announce (new packet hash, so past the dedup ring) arriving within
+    /// [`ANNOUNCE_MIN_INTERVAL`] is dropped, so a peer cannot make us re-ingest and re-forward
+    /// announces without bound.
+    announce_budget: Mutex<HashMap<AddressHash, Instant>>,
     /// The transport node reachable on each interface (its identity hash), learned from the
     /// `transport` field of header-type-2 announces. Packets sent out an interface with a
     /// transport node are addressed header-type-2 `[transport][dest]` so the node forwards
@@ -291,6 +311,9 @@ struct Shared {
 struct PathEntry {
     iface: InterfaceId,
     hops: u8,
+    /// When this route was last (re)learned from an announce. Routes older than [`PATH_TTL`]
+    /// are treated as stale and evicted on lookup.
+    learned: Instant,
 }
 
 impl Shared {
@@ -337,15 +360,55 @@ impl Shared {
         pkt
     }
 
-    /// Record that `dest` is reachable via `iface` at `hops`, keeping the shortest route.
+    /// Record that `dest` is reachable via `iface` at `hops`. Keeps the shortest fresh route,
+    /// but always refreshes the learned time (so a re-announce keeps a route alive), and
+    /// replaces a route that has expired regardless of hop count.
     fn learn_path(&self, dest: AddressHash, iface: InterfaceId, hops: u8) {
         let mut t = self.path_table.lock().unwrap();
-        match t.get(&dest) {
-            Some(e) if e.hops <= hops => {}
-            _ => {
-                t.insert(dest, PathEntry { iface, hops });
+        let now = Instant::now();
+        let keep_existing = t
+            .get(&dest)
+            .is_some_and(|e| e.hops <= hops && now.duration_since(e.learned) < PATH_TTL);
+        if keep_existing {
+            // Existing route is at least as short and still fresh: keep it, refresh its time.
+            if let Some(e) = t.get_mut(&dest) {
+                e.learned = now;
             }
+        } else {
+            t.insert(dest, PathEntry { iface, hops, learned: now });
         }
+    }
+
+    /// The interface to reach `dest`, if a route is known and unexpired. Evicts an expired
+    /// route as a side effect, so a stale path never lingers past a lookup.
+    fn path_iface(&self, dest: AddressHash) -> Option<InterfaceId> {
+        let mut t = self.path_table.lock().unwrap();
+        match t.get(&dest) {
+            Some(e) if e.learned.elapsed() < PATH_TTL => Some(e.iface),
+            Some(_) => {
+                t.remove(&dest);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Whether an announce for `dest` is within budget (accept and record it) or is arriving
+    /// too soon after the last accepted one (drop it). Prunes stale entries when the map grows
+    /// past [`SEEN_ANNOUNCES`], so it stays bounded under a many-destination flood.
+    fn announce_within_budget(&self, dest: AddressHash) -> bool {
+        let mut budget = self.announce_budget.lock().unwrap();
+        let now = Instant::now();
+        if let Some(&last) = budget.get(&dest)
+            && now.duration_since(last) < ANNOUNCE_MIN_INTERVAL
+        {
+            return false;
+        }
+        if budget.len() > SEEN_ANNOUNCES {
+            budget.retain(|_, t| now.duration_since(*t) < ANNOUNCE_MIN_INTERVAL);
+        }
+        budget.insert(dest, now);
+        true
     }
 
     /// Whether this announce (by packet hash) is new; records it if so.
@@ -401,6 +464,7 @@ impl Endpoint {
             routing: AtomicBool::new(false),
             path_table: Mutex::new(HashMap::new()),
             seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
+            announce_budget: Mutex::new(HashMap::new()),
             iface_transport: Mutex::new(HashMap::new()),
             link_transport: Mutex::new(HashMap::new()),
             tasks: Mutex::new(Vec::new()),
@@ -483,14 +547,18 @@ impl Endpoint {
         self.shared.routing.store(true, Ordering::Relaxed);
     }
 
-    /// The interface a learned destination is reachable over, and its hop count.
+    /// The interface a learned destination is reachable over, and its hop count. An expired
+    /// route is not returned (and is evicted).
     pub fn route_to(&self, dest: AddressHash) -> Option<(InterfaceId, u8)> {
-        self.shared
-            .path_table
-            .lock()
-            .unwrap()
-            .get(&dest)
-            .map(|e| (e.iface, e.hops))
+        let mut t = self.shared.path_table.lock().unwrap();
+        match t.get(&dest) {
+            Some(e) if e.learned.elapsed() < PATH_TTL => Some((e.iface, e.hops)),
+            Some(_) => {
+                t.remove(&dest);
+                None
+            }
+            None => None,
+        }
     }
 
     /// This endpoint's public identity.
@@ -599,14 +667,7 @@ impl Endpoint {
         // Send the request toward the destination: on the interface the path table names
         // (addressed via its transport node if remote), or broadcast if we have no route yet
         // (a directly-connected peer).
-        match self
-            .shared
-            .path_table
-            .lock()
-            .unwrap()
-            .get(&dest)
-            .map(|e| e.iface)
-        {
+        match self.shared.path_iface(dest) {
             Some(iface) => self.shared.send_on(iface, request),
             None => self.shared.broadcast(request),
         }
@@ -764,6 +825,12 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
     match pkt.packet_type {
         PacketType::Announce => {
             if let Ok(a) = Announce::decode(&pkt) {
+                // Rate-limit: a fresh re-announce arriving too soon after the last accepted
+                // one for this destination is dropped, so it neither re-populates our tables
+                // nor gets re-forwarded.
+                if !shared.announce_within_budget(a.destination) {
+                    return;
+                }
                 shared.address_book.lock().unwrap().ingest(&a);
                 shared.learn_path(a.destination, iface, pkt.hops);
                 // A header-type-2 announce names the transport node forwarding it; remember
@@ -908,13 +975,8 @@ fn forward(shared: &Arc<Shared>, from: InterfaceId, pkt: Packet) {
     }
     let dest = pkt.destination;
 
-    // Route toward the destination by the path table.
-    let next = shared
-        .path_table
-        .lock()
-        .unwrap()
-        .get(&dest)
-        .map(|e| e.iface);
+    // Route toward the destination by the path table (unexpired routes only).
+    let next = shared.path_iface(dest);
     if let Some(out) = next {
         // A link request establishes a bridge: record the link id's two interfaces so the
         // proof and subsequent link data forward back the way they came.
@@ -1185,4 +1247,42 @@ fn next_iv() -> [u8; IV_LEN] {
     let mut iv = [0u8; IV_LEN];
     fill_random(&mut iv);
     iv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_learned_route_expires_and_is_evicted() {
+        let ep = Endpoint::new(PrivateIdentity::from_secret_bytes(&[1u8; 64]));
+        let dest = AddressHash::from_bytes([0xAB; 16]);
+        ep.shared.learn_path(dest, 7, 2);
+        assert_eq!(ep.route_to(dest), Some((7, 2)), "a fresh route is returned");
+
+        // PATH_TTL is short under cfg(test); wait past it.
+        tokio::time::sleep(PATH_TTL + Duration::from_millis(40)).await;
+
+        assert_eq!(ep.route_to(dest), None, "an expired route is not returned");
+        assert!(
+            !ep.shared.path_table.lock().unwrap().contains_key(&dest),
+            "and is evicted on lookup",
+        );
+    }
+
+    #[tokio::test]
+    async fn announces_are_rate_limited_per_destination() {
+        let ep = Endpoint::new(PrivateIdentity::from_secret_bytes(&[2u8; 64]));
+        let a = AddressHash::from_bytes([0x01; 16]);
+        let b = AddressHash::from_bytes([0x02; 16]);
+        // The first announce for a destination is accepted.
+        assert!(ep.shared.announce_within_budget(a), "first for a accepted");
+        assert!(ep.shared.announce_within_budget(b), "first for b accepted");
+        // An immediate re-announce for the same destination is dropped.
+        assert!(!ep.shared.announce_within_budget(a), "a re-announce rate-limited");
+        assert!(!ep.shared.announce_within_budget(b), "b re-announce rate-limited");
+        // A different, unseen destination is still accepted.
+        let c = AddressHash::from_bytes([0x03; 16]);
+        assert!(ep.shared.announce_within_budget(c), "a new destination is accepted");
+    }
 }
