@@ -349,7 +349,9 @@ proposal, not fixed.
   ratchet (retinue already parses + stores ratchets from announces); ratchet rotation
   and retention. Forward secrecy for the asymmetric-packet path.
 - **R10 — remaining interfaces.** Serial/KISS, RNode, UDP, and the others, behind the
-  same interface seam as TCP.
+  same interface seam as TCP. The Heltec/RNode route, embedded Rust boundary,
+  and stock-firmware versus Rust-firmware sequencing are specified in
+  [`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md).
 - **Still out:** LXMF and application/message layers (separate sibling).
 
 ## On-air readiness — the pre-R10 gate (added 2026-07-17)
@@ -452,6 +454,15 @@ five-into-one decomposition and the Channel-joins-the-bucket / lossy-oracle
 sharpening are theirs; the Channel/Buffer naming and the KISS/HDLC mechanics are
 retinue's. The lossy oracle is the agreed next build; the RNode board is the agreed
 procurement.*
+
+**2026-07-19 update:** current stable RNode Firmware 1.86 now explicitly lists
+Heltec LoRa32 V3, V4, and T114. Hardware is still required for a black-box opcode
+capture under the provenance policy above, but board support is no longer an
+unknown. A separate GPLv3 Rust port of RNode Firmware is now the accepted second
+lane; a native embedded Retinue node is different again. The host capture must
+land and be tagged before the firmware port begins inspecting upstream source.
+The three lanes and their gates are separated in
+[`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md).
 
 ## Decisions (2026-07-13)
 

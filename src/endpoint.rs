@@ -256,9 +256,6 @@ struct Shared {
     /// (with the interface the proof came in on), and the half-open link that verifies it.
     pending: Mutex<HashMap<AddressHash, oneshot::Sender<(Link, InterfaceId)>>>,
     pending_links: Mutex<HashMap<AddressHash, link::PendingLink>>,
-    /// A monotonic source of IV nonces. AES-CBC IVs must be unpredictable in production;
-    /// the shell seeds this from the clock and the caller can substitute a CSPRNG.
-    iv_seed: Mutex<u64>,
     next_iface_id: AtomicU32,
     /// Whether this endpoint acts as a transport node (forwards announces and packets).
     routing: AtomicBool,
@@ -383,7 +380,6 @@ impl Endpoint {
             announce_tx,
             pending: Mutex::new(HashMap::new()),
             pending_links: Mutex::new(HashMap::new()),
-            iv_seed: Mutex::new(seed_iv()),
             next_iface_id: AtomicU32::new(0),
             routing: AtomicBool::new(false),
             path_table: Mutex::new(HashMap::new()),
@@ -514,7 +510,7 @@ impl Endpoint {
         let pkt = announce::build(
             &self.shared.identity,
             name.name_hash(),
-            &rand_hash(&self.shared),
+            &rand_hash(),
             None,
             app_data,
         );
@@ -550,7 +546,7 @@ impl Endpoint {
     /// Establish a link to `dest` (whose identity is `peer`), returning it with the interface
     /// its proof arrived on. The stream discipline is chosen by the caller.
     async fn establish(&self, dest: AddressHash, peer: Identity) -> io::Result<(Link, InterfaceId)> {
-        let ephemeral = ephemeral_seed(&self.shared);
+        let ephemeral = ephemeral_seed();
         let (pending, request) = link::PendingLink::open(
             dest,
             peer,
@@ -727,7 +723,7 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                 .find(|r| r.dest == dest)
                 .map(|r| r.reliable);
             if let Some(reliable) = reliable {
-                let ephemeral = ephemeral_seed(shared);
+                let ephemeral = ephemeral_seed();
                 if let Ok((link, proof)) = link::accept(
                     &pkt,
                     &shared.identity,
@@ -883,7 +879,7 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
                     break;
                 }
                 Ok(n) => {
-                    let iv = next_iv(&iv_shared);
+                    let iv = next_iv();
                     iv_shared.send_on(iface, out_link.data_packet(&buf[..n], &iv));
                 }
             }
@@ -967,7 +963,7 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
 
             // After any event, put ready channel packets on the wire: new data within the
             // window, plus retransmits past their timeout.
-            for pkt in rc.poll_transmit(clock, || next_iv(&drv)) {
+            for pkt in rc.poll_transmit(clock, next_iv) {
                 drv.send_on(iface, pkt);
             }
 
@@ -986,46 +982,32 @@ fn register_reliable_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId
     LinkStream { inner: mine, link_id }
 }
 
-fn rand_hash(shared: &Arc<Shared>) -> [u8; RAND_HASH_LEN] {
-    let src = next_iv(shared); // 16 bytes, enough for the 10-byte rand hash
+/// Fill `buf` with cryptographically secure OS randomness. Link ephemeral secrets and AES
+/// IVs depend on this being unpredictable — the whole link's secrecy rests on the ephemeral
+/// key an eavesdropper must not be able to guess — so a failure to obtain entropy is fatal:
+/// this panics rather than hand back weak bytes.
+fn fill_random(buf: &mut [u8]) {
+    getrandom::getrandom(buf).expect("OS CSPRNG unavailable");
+}
+
+/// A fresh 10-byte announce randomness value.
+fn rand_hash() -> [u8; RAND_HASH_LEN] {
     let mut out = [0u8; RAND_HASH_LEN];
-    out.copy_from_slice(&src[..RAND_HASH_LEN]);
+    fill_random(&mut out);
     out
 }
 
-fn ephemeral_seed(shared: &Arc<Shared>) -> [u8; 64] {
-    // A fresh 64-byte seed per link. Derived from the IV source; a production endpoint
-    // should draw this from a CSPRNG, but it must only be unique+unpredictable per link.
+/// A fresh 64-byte link ephemeral seed (`x25519_secret(32) || ed25519_seed(32)`), unique and
+/// unpredictable per link.
+fn ephemeral_seed() -> [u8; 64] {
     let mut seed = [0u8; 64];
-    for chunk in seed.chunks_mut(8) {
-        let v = next_u64(shared);
-        chunk.copy_from_slice(&v.to_le_bytes()[..chunk.len()]);
-    }
+    fill_random(&mut seed);
     seed
 }
 
-fn next_iv(shared: &Arc<Shared>) -> [u8; IV_LEN] {
-    let a = next_u64(shared);
-    let b = next_u64(shared);
+/// A fresh AES-CBC IV. Must be unpredictable per packet under a given link key.
+fn next_iv() -> [u8; IV_LEN] {
     let mut iv = [0u8; IV_LEN];
-    iv[..8].copy_from_slice(&a.to_le_bytes());
-    iv[8..].copy_from_slice(&b.to_le_bytes());
+    fill_random(&mut iv);
     iv
-}
-
-fn next_u64(shared: &Arc<Shared>) -> u64 {
-    let mut g = shared.iv_seed.lock().unwrap();
-    // A small xorshift so successive values are not trivially sequential.
-    let mut x = *g;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    *g = x;
-    x
-}
-
-fn seed_iv() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(1);
-    (n as u64) | 1
 }
