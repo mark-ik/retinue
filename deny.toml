@@ -18,10 +18,18 @@ all-features = true
 [licenses]
 version = 2
 # Exactly the permissive licenses currently in the tree — kept tight on purpose. A new
-# dependency that introduces any other license fails this check, forcing a review: a
-# permissive one (ISC, BSD-2-Clause, Zlib, ...) is a one-line, reviewed addition here; a
-# copyleft one (any GPL/LGPL/AGPL, MPL, ...) must never be added, since it would relicense
-# every firmware image that links retinue. bzip2-1.0.6 is the permissive bzlib license.
+# dependency that introduces any other license fails this check, forcing a review:
+#
+#   * A permissive one (ISC, BSD-2-Clause, Zlib, ...) is a one-line, reviewed addition here.
+#   * GPL/LGPL/AGPL is the hard red line: it is viral, so it would relicense any firmware
+#     image that statically links retinue to (A)GPL. Never add it.
+#   * MPL-2.0 is only *file-level* copyleft — it would NOT relicense the combined image, just
+#     keep the MPL files themselves under MPL — so it is not the GPL hazard. retinue still
+#     stays MPL-free by policy (it carries no Servo-derived code); MPL lives in genet, whose
+#     stylo/Servo lineage makes it MPL by design. So MPL is excluded here as convention, not
+#     because it is dangerous to combine.
+#
+# bzip2-1.0.6 is the permissive bzlib license.
 allow = [
     "MIT",
     "Apache-2.0",
