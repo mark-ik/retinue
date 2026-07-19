@@ -1,0 +1,20 @@
+{
+  "description": "RNS 1.3.8 link IDENTIFY (context LINKIDENTIFY = 251). Our hand-driven initiator sent an identify built per each candidate; RNS's remote_identified_callback firing with our identity hash marks the wire-correct one (payload, signed message, and whether it is sealed with the link key).",
+  "rns_version": "1.3.8",
+  "context_identify": 251,
+  "link_id_hex": "884427832578c7b9f18142069008daae",
+  "our_identity_public_hex": "7b4e909bbe7ffe44c465a220037d608ee35897d31ef972f07f74892cb0f73f13a09aa5f47a6759802ff955f8dc2d2a14a5c99d23be97f864127ff9383455a4f0",
+  "our_identity_hash_hex": "0b586e4a729968b321ffc949fc7088b8",
+  "our_identity_secret_seed_hex": "11111111111111111111111111111111111111111111111111111111111111112222222222222222222222222222222222222222222222222222222222222222",
+  "signed_message": "link_id(16) || public_key(64)",
+  "signature_hex": "db60e3cb986eb3fe1c9ed1bbebe0b70672a02b152776de7f64eb8924e7b4fde5c6646c64ebbc7f13b7ead54ae5a9f3fa036d53499895a9149042c41edc38eb04",
+  "payload_layout": "public_key(64) || signature(64), sealed with the link key",
+  "candidates": [
+    {
+      "candidate": "sealed_sig_over_linkid_pub",
+      "sealed": true,
+      "accepted": true
+    }
+  ],
+  "winner": "sealed_sig_over_linkid_pub"
+}

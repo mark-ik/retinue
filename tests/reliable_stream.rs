@@ -35,13 +35,12 @@ async fn reliable_request_response_end_to_end() {
     connect(&client, &server, LossModel::new(1), LossModel::new(2));
     // (`server` is an Arc; `connect` and the endpoint methods deref through it.)
 
-    // Server: accept one reliable link (validating the client's proofs against its known
-    // identity), read the whole request, reply with its length, and finish.
-    let client_pub = *client_id.public();
+    // Server: accept one reliable link (it learns the client's identity from the client's
+    // IDENTIFY), read the whole request, reply with its length, and finish.
     let server_task = tokio::spawn({
         let server = Arc::clone(&server);
         async move {
-            let mut stream = server.accept_reliable(client_pub).await.unwrap();
+            let mut stream = server.accept_reliable().await.unwrap();
             let mut req = Vec::new();
             stream.read_to_end(&mut req).await.unwrap();
             let mut resp = b"got ".to_vec();

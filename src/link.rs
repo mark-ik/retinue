@@ -39,8 +39,8 @@
 
 use x25519_dalek::PublicKey as XPublicKey;
 
-use crate::hash::AddressHash;
-use crate::identity::{Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
+use crate::hash::{AddressHash, ADDRESS_HASH_LEN};
+use crate::identity::{IDENTITY_LEN, Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
 use crate::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation};
 use crate::token::{DerivedKeys, IV_LEN};
 use crate::{Error, Result};
@@ -63,6 +63,10 @@ pub const CTX_LRPROOF: u8 = 0xff;
 /// Packet context byte for a `Channel` message (RNS `Packet.CHANNEL`). A reliable stream's
 /// envelopes ride link data packets under this context; see [`crate::reliable`].
 pub const CTX_CHANNEL: u8 = 0x0e;
+
+/// Packet context byte for a link IDENTIFY (RNS `Packet.LINKIDENTIFY`). An initiator sends
+/// one so the responder learns its identity; see [`Link::identify_packet`].
+pub const CTX_LINKIDENTIFY: u8 = 0xfb;
 
 /// Packet context byte for the link RTT packet.
 pub const CTX_LRRTT: u8 = 0xfe;
@@ -391,6 +395,18 @@ pub fn accept(
 /// link data, where the proof must carry the hash to name the packet it acknowledges.
 pub const DATA_PROOF_LEN: usize = 32 + SIGNATURE_LEN;
 
+/// Bytes of a link IDENTIFY payload (sealed): `public_key(64) || signature(64)`.
+pub const LINK_IDENTIFY_LEN: usize = IDENTITY_LEN + SIGNATURE_LEN;
+
+/// The message an IDENTIFY signs: `link_id(16) || public_key(64)`. Binding the identity to
+/// the link id stops an identify from one link being replayed on another.
+fn identify_signed_message(link_id: AddressHash, public: &[u8; IDENTITY_LEN]) -> Vec<u8> {
+    let mut signed = Vec::with_capacity(ADDRESS_HASH_LEN + IDENTITY_LEN);
+    signed.extend_from_slice(link_id.as_slice());
+    signed.extend_from_slice(public);
+    signed
+}
+
 /// Build the explicit link-data proof packet: a `Proof`-type packet addressed to
 /// `link_id`, context `0x00`, payload `proven_full_hash(32) || Ed25519_sign(prover,
 /// proven_full_hash)(64)`, sent unencrypted. This is RNS 1.3.8's link-data proof exactly
@@ -563,6 +579,35 @@ impl Link {
     /// link. The inverse of [`data_proof`](Self::data_proof).
     pub fn verify_data_proof(&self, proof: &Packet, peer: &Identity) -> Option<[u8; 32]> {
         read_data_proof(self.id, proof, peer)
+    }
+
+    /// Build a link **IDENTIFY** packet: sealed `public_key(64) || Ed25519_sign(link_id ||
+    /// public_key)(64)` under context [`CTX_LINKIDENTIFY`]. An initiator sends this so the
+    /// responder learns its identity (and can then validate the initiator's data proofs). The
+    /// signature binds the identity to *this* link, so an identify captured on one link cannot
+    /// be replayed on another. RNS 1.3.8's exact wire (captured in `link_identify.json`).
+    pub fn identify_packet(&self, me: &PrivateIdentity, iv: &[u8; IV_LEN]) -> Packet {
+        let public = me.public().to_public_bytes();
+        let signature = me.sign(&identify_signed_message(self.id, &public));
+        let mut plaintext = Vec::with_capacity(LINK_IDENTIFY_LEN);
+        plaintext.extend_from_slice(&public);
+        plaintext.extend_from_slice(&signature);
+        self.sealed_packet(CTX_LINKIDENTIFY, &plaintext, iv)
+    }
+
+    /// Validate an inbound IDENTIFY packet on this link, returning the peer [`Identity`] it
+    /// proves, or `None` if it does not decrypt, is malformed, or the signature does not
+    /// verify. The inverse of [`identify_packet`](Self::identify_packet).
+    pub fn read_identify(&self, packet: &Packet) -> Option<Identity> {
+        let plaintext = self.decrypt(packet).ok()?;
+        if plaintext.len() != LINK_IDENTIFY_LEN {
+            return None;
+        }
+        let public: [u8; IDENTITY_LEN] = plaintext[..IDENTITY_LEN].try_into().ok()?;
+        let signature: [u8; SIGNATURE_LEN] = plaintext[IDENTITY_LEN..].try_into().ok()?;
+        let peer = Identity::from_public_bytes(&public).ok()?;
+        peer.verify(&identify_signed_message(self.id, &public), &signature)
+            .then_some(peer)
     }
 
     /// Classify an inbound packet addressed to this link.
@@ -870,5 +915,59 @@ mod tests {
             None,
             "wrong link rejected",
         );
+    }
+
+    /// Gold test: retinue signs a link IDENTIFY to RNS 1.3.8's exact signature (captured in
+    /// link_identify.json), which also confirms retinue's identity-pubkey derivation matches.
+    #[test]
+    fn identify_signature_matches_rns_capture() {
+        let doc: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/link_identify.json")).unwrap();
+        let link_id =
+            AddressHash::from_slice(&hex::decode(doc["link_id_hex"].as_str().unwrap()).unwrap())
+                .unwrap();
+        let public: [u8; IDENTITY_LEN] =
+            hex::decode(doc["our_identity_public_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let seed: [u8; IDENTITY_LEN] =
+            hex::decode(doc["our_identity_secret_seed_hex"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap();
+        let me = PrivateIdentity::from_secret_bytes(&seed);
+        assert_eq!(me.public().to_public_bytes(), public, "pubkey derivation matches RNS");
+        let sig = me.sign(&identify_signed_message(link_id, &public));
+        assert_eq!(
+            hex::encode(sig),
+            doc["signature_hex"].as_str().unwrap(),
+            "identify signature must equal RNS's",
+        );
+    }
+
+    /// An initiator's identify round-trips over a real link: the responder recovers the
+    /// initiator's identity, and a tampered packet is rejected.
+    #[test]
+    fn identify_round_trips_over_a_link() {
+        let dest_identity = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let (pending, request) = PendingLink::open(
+            DestinationName::new("retinue", ["test"]).destination_hash(dest_identity.public()),
+            *dest_identity.public(),
+            &[0x33; 64],
+            trailer,
+        );
+        let (responder, proof) = accept(&request, &dest_identity, &[0x99; 64], trailer).unwrap();
+        let initiator = pending.prove(&proof).unwrap();
+
+        let me = PrivateIdentity::from_secret_bytes(&[0x77; 64]);
+        let pkt = initiator.identify_packet(&me, &[0x01; 16]);
+        let learned = responder.read_identify(&pkt).expect("valid identify");
+        assert_eq!(learned.hash(), me.public().hash(), "responder learns the initiator");
+
+        let mut bad = pkt.clone();
+        *bad.payload.last_mut().unwrap() ^= 0x01;
+        assert!(responder.read_identify(&bad).is_none(), "tampered identify rejected");
     }
 }

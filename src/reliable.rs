@@ -42,18 +42,31 @@ pub struct ReliableChannel {
     buffer: Buffer,
     /// Our identity — signs the proofs of packets we receive.
     prover: PrivateIdentity,
-    /// The peer's identity — validates the proofs of packets we sent.
-    peer: Identity,
+    /// The peer's identity — validates the proofs of packets we sent. `None` until it is
+    /// known: an initiator holds the destination's identity from the announce; a responder
+    /// learns the initiator's from the IDENTIFY it sends ([`on_identify`](Self::on_identify)).
+    /// Until it is set, the peer's proofs cannot be validated, so nothing we send is released.
+    peer: Option<Identity>,
     /// Full hash of each channel packet we put on the wire, to its sequence. An inbound
     /// proof carries the hash; this maps it back to the sequence to release.
     sent: HashMap<[u8; 32], u16>,
 }
 
 impl ReliableChannel {
-    /// A reliable channel over `link`. `prover` is our identity (we sign proofs of packets
-    /// we receive with it); `peer` is the identity we validate the peer's proofs against —
-    /// for an initiator, the destination's identity from its announce.
+    /// A reliable channel whose peer is already known — an initiator, holding the
+    /// destination's identity from its announce. `prover` is our identity.
     pub fn new(link: Link, prover: PrivateIdentity, peer: Identity) -> Self {
+        Self::build(link, prover, Some(peer))
+    }
+
+    /// A reliable channel whose peer is not yet known — a responder, which learns the
+    /// initiator's identity from the IDENTIFY it sends (feed packets to
+    /// [`on_identify`](Self::on_identify)). Until then its proofs are not validated.
+    pub fn accepting(link: Link, prover: PrivateIdentity) -> Self {
+        Self::build(link, prover, None)
+    }
+
+    fn build(link: Link, prover: PrivateIdentity, peer: Option<Identity>) -> Self {
         Self {
             link,
             buffer: Buffer::new(),
@@ -61,6 +74,23 @@ impl ReliableChannel {
             peer,
             sent: HashMap::new(),
         }
+    }
+
+    /// Feed an inbound IDENTIFY packet: if it validates, learn the peer identity so the
+    /// peer's proofs can be validated from here on. Returns whether it was learned.
+    pub fn on_identify(&mut self, packet: &Packet) -> bool {
+        match self.link.read_identify(packet) {
+            Some(peer) => {
+                self.peer = Some(peer);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The peer identity, once known.
+    pub fn peer(&self) -> Option<&Identity> {
+        self.peer.as_ref()
     }
 
     /// Queue application bytes for reliable, in-order delivery.
@@ -107,7 +137,11 @@ impl ReliableChannel {
     /// Feed an inbound proof: if it validates against the peer's identity and names a packet
     /// we sent, release that sequence. Returns whether it matched an outstanding packet.
     pub fn on_proof(&mut self, proof: &Packet, now: u64) -> bool {
-        let Some(hash) = self.link.verify_data_proof(proof, &self.peer) else {
+        let hash = match &self.peer {
+            Some(peer) => self.link.verify_data_proof(proof, peer),
+            None => None, // peer not yet identified: cannot validate its proofs
+        };
+        let Some(hash) = hash else {
             return false;
         };
         let Some(sequence) = self.sent.remove(&hash) else {
@@ -286,5 +320,49 @@ mod tests {
         // The genuine proof (server signs with its identity) does release it.
         let real = server.on_data_packet(&sent[0]).unwrap();
         assert!(client.on_proof(&real, 2), "genuine proof accepted");
+    }
+
+    #[test]
+    fn a_responder_validates_proofs_only_after_identify() {
+        // A responder starts without the initiator's identity, so it cannot validate the
+        // initiator's proofs of the data the responder sends. After the initiator's IDENTIFY,
+        // it learns the identity and the same proof is accepted.
+        let server_id = PrivateIdentity::from_secret_bytes(&[0x22; 64]);
+        let client_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
+        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let dest = DestinationName::new("retinue", ["test"]).destination_hash(server_id.public());
+        let (pending, request) = PendingLink::open(dest, *server_id.public(), &[0x33; 64], trailer);
+        let (responder_link, proof) = accept(&request, &server_id, &[0x99; 64], trailer).unwrap();
+        let initiator_link = pending.prove(&proof).unwrap();
+
+        // Server accepts without knowing the client; the client already knows the server.
+        let server_pub = *server_id.public();
+        let mut server = ReliableChannel::accepting(responder_link, server_id);
+        let mut client = ReliableChannel::new(initiator_link, client_id.clone(), server_pub);
+
+        // The server sends a message; the client receives it and proves it back.
+        server.write(b"a message from the server");
+        let mut ivc = 0u64;
+        let mut iv = || {
+            ivc += 1;
+            let mut v = [0u8; IV_LEN];
+            v[..8].copy_from_slice(&ivc.to_le_bytes());
+            v
+        };
+        let sent = server.poll_transmit(0, &mut iv);
+        assert!(!sent.is_empty());
+        let proof = client.on_data_packet(&sent[0]).expect("client proves the server's packet");
+
+        // Before identify the server cannot validate the client's proof, so it is not released.
+        assert!(server.peer().is_none(), "no peer yet");
+        assert!(!server.on_proof(&proof, 1), "proof rejected before identify");
+        assert!(!server.send_idle(), "the server's packet is still outstanding");
+
+        // The client identifies; now the server learns it and accepts the same proof.
+        let id_packet = client.link.identify_packet(&client_id, &[0x07; IV_LEN]);
+        assert!(server.on_identify(&id_packet), "server learns the client");
+        assert_eq!(server.peer().map(|p| p.hash()), Some(client_id.public().hash()));
+        assert!(server.on_proof(&proof, 2), "proof accepted after identify");
+        assert!(server.send_idle(), "the server's packet is now released");
     }
 }

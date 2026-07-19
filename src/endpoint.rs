@@ -33,7 +33,9 @@ use crate::destination::DestinationName;
 use crate::hash::AddressHash;
 use crate::identity::{Identity, PrivateIdentity};
 use crate::iface::hdlc::{Deframer, frame};
-use crate::link::{self, CTX_CHANNEL, CTX_LINKCLOSE, Inbound, Link, LinkMode, LinkTrailer};
+use crate::link::{
+    self, CTX_CHANNEL, CTX_LINKCLOSE, CTX_LINKIDENTIFY, Inbound, Link, LinkMode, LinkTrailer,
+};
 use crate::packet::{Packet, PacketType};
 use crate::reliable::ReliableChannel;
 use crate::token::IV_LEN;
@@ -239,17 +241,6 @@ struct Registered {
     reliable: bool,
 }
 
-/// An accepted inbound **reliable** link, handed to [`Endpoint::accept_reliable`] to bind a
-/// [`ReliableChannel`] once the caller supplies the peer identity to validate proofs against.
-struct AcceptedLink {
-    link: Link,
-    iface: InterfaceId,
-    /// The destination the link targeted. Kept for parity with [`Accepted`] and future
-    /// per-destination reliable dispatch; `accept_reliable` does not surface it yet.
-    #[allow(dead_code)]
-    destination: AddressHash,
-}
-
 /// Shared router state.
 struct Shared {
     identity: PrivateIdentity,
@@ -262,9 +253,9 @@ struct Shared {
     router_tx: mpsc::Sender<(InterfaceId, Packet)>,
     /// Inbound accepted links (stream + destination), surfaced to `accept`.
     accepted_tx: mpsc::UnboundedSender<Accepted>,
-    /// Inbound accepted reliable links, surfaced to `accept_reliable` (which binds the
-    /// stream once given the peer identity to validate proofs against).
-    reliable_accepted_tx: mpsc::UnboundedSender<AcceptedLink>,
+    /// Inbound accepted reliable streams, surfaced to `accept_reliable`. Registered eagerly
+    /// (the peer identity is learned from the initiator's IDENTIFY, not needed up front).
+    reliable_accepted_tx: mpsc::UnboundedSender<LinkStream>,
     /// Validated announces, surfaced to `announcements`.
     announce_tx: mpsc::UnboundedSender<PeerAnnounce>,
     /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake
@@ -382,7 +373,7 @@ impl Shared {
 pub struct Endpoint {
     shared: Arc<Shared>,
     accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<Accepted>>,
-    reliable_accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<AcceptedLink>>,
+    reliable_accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<LinkStream>>,
     announce_rx: AsyncMutex<mpsc::UnboundedReceiver<PeerAnnounce>>,
 }
 
@@ -391,8 +382,7 @@ impl Endpoint {
     pub fn new(identity: PrivateIdentity) -> Self {
         let (router_tx, mut router_rx) = mpsc::channel::<(InterfaceId, Packet)>(ROUTER_QUEUE);
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
-        let (reliable_accepted_tx, reliable_accepted_rx) =
-            mpsc::unbounded_channel::<AcceptedLink>();
+        let (reliable_accepted_tx, reliable_accepted_rx) = mpsc::unbounded_channel::<LinkStream>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
         let shared = Arc::new(Shared {
@@ -516,8 +506,8 @@ impl Endpoint {
 
     /// Register a destination to accept **reliable** links on — the Channel/Buffer path with
     /// proof acks, for lossy interfaces — and announce it. Accept these with
-    /// [`accept_reliable`](Self::accept_reliable), supplying the peer identity whose proofs
-    /// to validate.
+    /// [`accept_reliable`](Self::accept_reliable); the initiator's identity arrives over the
+    /// link, so none need be supplied.
     pub fn register_reliable(&self, name: DestinationName, app_data: &[u8]) {
         self.register_with(name, app_data, true);
     }
@@ -562,12 +552,13 @@ impl Endpoint {
     }
 
     /// Open a **reliable** link to a destination — the Channel/Buffer path with proof acks,
-    /// for lossy interfaces — and return its stream. `peer` is the destination's identity:
-    /// the handshake authenticates it, and the peer's proofs of our packets are validated
-    /// against it.
+    /// for lossy interfaces — and return its stream. `peer` is the destination's identity: the
+    /// handshake authenticates it, and the peer's proofs of our packets are validated against
+    /// it. As the initiator, the reliable driver IDENTIFYs us to the responder so it can
+    /// validate our proofs in turn.
     pub async fn open_reliable(&self, dest: AddressHash, peer: Identity) -> io::Result<LinkStream> {
         let (link, iface) = self.establish(dest, peer).await?;
-        Ok(register_reliable_stream(&self.shared, link, iface, peer))
+        Ok(register_reliable_stream(&self.shared, link, iface, Some(peer)))
     }
 
     /// Establish a link to `dest` (whose identity is `peer`), returning it with the interface
@@ -653,26 +644,16 @@ impl Endpoint {
     }
 
     /// Wait for the next inbound **reliable** link (to a destination registered with
-    /// [`register_reliable`](Self::register_reliable)) and bind its stream. `peer` is the
-    /// initiator's identity, whose proofs of our sent packets this side validates against.
-    ///
-    /// The initiator's identity is not yet carried on the link (an `identify` step is a
-    /// follow-on), so the caller supplies the expected `peer` here — a retinue peer whose
-    /// identity is known out of band, or from its announce.
-    pub async fn accept_reliable(&self, peer: Identity) -> io::Result<LinkStream> {
-        let accepted = self
-            .reliable_accepted_rx
+    /// [`register_reliable`](Self::register_reliable)) and return its stream. The initiator's
+    /// identity is learned from the IDENTIFY it sends, so — unlike before — no peer identity
+    /// need be supplied here; the driver validates the initiator's proofs once it arrives.
+    pub async fn accept_reliable(&self) -> io::Result<LinkStream> {
+        self.reliable_accepted_rx
             .lock()
             .await
             .recv()
             .await
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))?;
-        Ok(register_reliable_stream(
-            &self.shared,
-            accepted.link,
-            accepted.iface,
-            peer,
-        ))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
     }
 
     /// The next validated announce, for building a host peer-id to destination map.
@@ -832,13 +813,12 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                 ) {
                     shared.send_on(iface, proof);
                     if reliable {
-                        // Defer the stream: accept_reliable binds it once given the peer
-                        // identity to validate proofs against.
-                        let _ = shared.reliable_accepted_tx.send(AcceptedLink {
-                            link,
-                            iface,
-                            destination: dest,
-                        });
+                        // Register eagerly with no peer yet: the driver learns the initiator's
+                        // identity from the IDENTIFY it sends. Registering now (rather than at
+                        // accept_reliable) means an early identify or data packet has a stream
+                        // to route to.
+                        let stream = register_reliable_stream(shared, link, iface, None);
+                        let _ = shared.reliable_accepted_tx.send(stream);
                     } else {
                         let stream = register_stream(shared, link, iface);
                         let _ = shared.accepted_tx.send(Accepted {
@@ -1026,12 +1006,15 @@ fn register_stream(shared: &Arc<Shared>, link: Link, iface: InterfaceId) -> Link
 /// [`ReliableChannel`] and pumps it — app writes in, ordered bytes out, a proof per
 /// delivered packet, an inbound proof releasing its sequence, and retransmits on a clock —
 /// so the stream stays honest over a lossy interface. `peer` is the identity whose proofs
-/// this side validates (the destination's identity, for an initiator).
+/// this side validates: `Some` for an initiator (the destination's identity from its
+/// announce), `None` for a responder, which learns the initiator's identity from the IDENTIFY
+/// the initiator sends. An initiator also sends its own IDENTIFY so the responder can validate
+/// it in turn.
 fn register_reliable_stream(
     shared: &Arc<Shared>,
     link: Link,
     iface: InterfaceId,
-    peer: Identity,
+    peer: Option<Identity>,
 ) -> LinkStream {
     let (mine, theirs) = tokio::io::duplex(DUPLEX_BUF);
     let (mut read_half, mut write_half) = tokio::io::split(theirs);
@@ -1047,10 +1030,20 @@ fn register_reliable_stream(
         },
     );
 
+    // An initiator (known peer) identifies itself so the responder can validate our proofs.
+    let identify = peer
+        .is_some()
+        .then(|| link.identify_packet(&shared.identity, &next_iv()));
     let close_link = link.clone();
-    let mut rc = ReliableChannel::new(link, shared.identity.clone(), peer);
+    let mut rc = match peer {
+        Some(p) => ReliableChannel::new(link, shared.identity.clone(), p),
+        None => ReliableChannel::accepting(link, shared.identity.clone()),
+    };
     let drv = Arc::clone(shared);
     track(shared, async move {
+        if let Some(id_packet) = identify {
+            drv.send_on(iface, id_packet);
+        }
         let mut buf = [0u8; WRITE_CHUNK];
         let mut clock: u64 = 0;
         let mut writer_open = true; // the app's write side is still open
@@ -1080,6 +1073,10 @@ fn register_reliable_stream(
                             let _ = write_half.shutdown().await;
                             peer_done = true;
                         }
+                    } else if pkt.context == CTX_LINKIDENTIFY {
+                        // The peer (an initiator) identified itself: learn its identity so we
+                        // can validate its proofs of the data we send back.
+                        rc.on_identify(&pkt);
                     } else if pkt.context == CTX_LINKCLOSE {
                         let _ = write_half.shutdown().await;
                         break;
