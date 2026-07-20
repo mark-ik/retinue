@@ -10,4 +10,5 @@
 pub mod advert;
 pub mod cipher;
 pub mod identity;
+pub mod message;
 pub mod packet;
