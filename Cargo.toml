@@ -10,3 +10,4 @@ keywords = ["lora", "mesh", "meshcore", "radio", "reticulum"]
 categories = ["network-programming", "embedded"]
 
 [dependencies]
+sha2 = "0.10"
