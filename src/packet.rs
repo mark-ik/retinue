@@ -126,6 +126,16 @@ impl Packet {
         Self::path_hash_size(path_len) != 4 && Self::path_byte_len(path_len) <= MAX_PATH
     }
 
+    /// The number of hops recorded in the path.
+    pub fn path_hop_count(&self) -> u8 {
+        self.path_len & 63
+    }
+
+    /// The size in bytes of each path hash (1 in the V1 wire).
+    pub fn path_hop_size(&self) -> u8 {
+        (self.path_len >> 6) + 1
+    }
+
     /// Truncated SHA256 identifying this packet for dedup: hashes the payload
     /// type, then (for TRACE only) the raw `path_len`, then the payload.
     pub fn packet_hash(&self) -> [u8; HASH_SIZE] {
