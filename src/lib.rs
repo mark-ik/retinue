@@ -12,4 +12,5 @@ pub mod cipher;
 pub mod identity;
 pub mod mesh;
 pub mod message;
+pub mod node;
 pub mod packet;
