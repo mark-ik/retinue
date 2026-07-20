@@ -1,0 +1,12 @@
+[package]
+name = "tulle"
+version = "0.0.1"
+edition = "2024"
+description = "Shared radio interface layer for LoRa mesh stacks: serial modem control and medium access, beneath retinue and its siblings. Name reservation; development upcoming."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mark-ik/tulle"
+readme = "README.md"
+keywords = ["lora", "radio", "mesh", "rnode", "reticulum"]
+categories = ["network-programming", "embedded"]
+
+[dependencies]
