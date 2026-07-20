@@ -11,3 +11,5 @@
 
 pub mod airtime;
 pub mod kiss;
+pub mod lora;
+pub mod modem;
