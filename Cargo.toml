@@ -10,4 +10,5 @@ keywords = ["lora", "mesh", "meshcore", "radio", "reticulum"]
 categories = ["network-programming", "embedded"]
 
 [dependencies]
+ed25519-dalek = "2"
 sha2 = "0.10"
