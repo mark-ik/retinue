@@ -1,0 +1,12 @@
+[package]
+name = "sennet"
+version = "0.0.1"
+edition = "2024"
+description = "Independent, permissively licensed mesh radio protocol implementation in the retinue family. Name reservation; development upcoming."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mark-ik/sennet"
+readme = "README.md"
+keywords = ["lora", "mesh", "radio", "reticulum"]
+categories = ["network-programming", "embedded"]
+
+[dependencies]
