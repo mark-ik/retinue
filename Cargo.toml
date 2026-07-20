@@ -1,0 +1,12 @@
+[package]
+name = "tucket"
+version = "0.0.1"
+edition = "2024"
+description = "MeshCore interop for the retinue radio family: node management and text interop over LoRa mesh. Name reservation; development upcoming."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mark-ik/tucket"
+readme = "README.md"
+keywords = ["lora", "mesh", "meshcore", "radio", "reticulum"]
+categories = ["network-programming", "embedded"]
+
+[dependencies]
