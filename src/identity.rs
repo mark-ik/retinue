@@ -7,7 +7,9 @@
 //!
 //! Ported from upstream MeshCore (MIT, <https://github.com/ripplebiz/MeshCore>).
 
+use curve25519_dalek::edwards::CompressedEdwardsY;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use sha2::{Digest, Sha512};
 
 use crate::packet::{PUB_KEY_SIZE, SIGNATURE_SIZE};
 
@@ -48,17 +50,29 @@ impl Identity {
     }
 }
 
-/// A local party: keypair on this device, can sign.
+/// A local party: keypair on this device, can sign and derive shared secrets.
 pub struct LocalIdentity {
     signing: SigningKey,
+    /// The X25519 scalar for ECDH: the clamped `SHA512(seed)[0..32]`, the same value MeshCore
+    /// stores as the first half of its expanded 64-byte private key.
+    x25519_scalar: [u8; 32],
 }
 
 impl LocalIdentity {
     /// Build from a 32-byte Ed25519 seed (the caller owns seed generation
     /// and storage; this crate takes no dependency on an RNG).
     pub fn from_seed(seed: [u8; 32]) -> Self {
+        // The Ed25519 secret scalar is the clamped first half of SHA512(seed); this is what
+        // MeshCore keeps as prv_key[0..32] and feeds to X25519 for ECDH.
+        let hash = Sha512::digest(seed);
+        let mut scalar = [0u8; 32];
+        scalar.copy_from_slice(&hash[..32]);
+        scalar[0] &= 248;
+        scalar[31] &= 127;
+        scalar[31] |= 64;
         LocalIdentity {
             signing: SigningKey::from_bytes(&seed),
+            x25519_scalar: scalar,
         }
     }
 
@@ -68,6 +82,15 @@ impl LocalIdentity {
 
     pub fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_SIZE] {
         self.signing.sign(message).to_bytes()
+    }
+
+    /// The MeshCore ECDH shared secret with `peer`: X25519 Diffie-Hellman over the Ed25519
+    /// keys transposed to Montgomery form (`u = (1 + y) / (1 - y)`), matching upstream's
+    /// `ed25519_key_exchange`. Returns `None` if the peer's key is not a valid curve point.
+    /// The 32-byte result is the key material for the per-pair cipher (see [`crate::cipher`]).
+    pub fn shared_secret(&self, peer: &Identity) -> Option<[u8; 32]> {
+        let montgomery = CompressedEdwardsY(peer.pub_key).decompress()?.to_montgomery();
+        Some(montgomery.mul_clamped(self.x25519_scalar).to_bytes())
     }
 }
 

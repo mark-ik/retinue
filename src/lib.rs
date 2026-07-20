@@ -8,5 +8,6 @@
 //! A tucket is a trumpet flourish announcing a single arrival.
 
 pub mod advert;
+pub mod cipher;
 pub mod identity;
 pub mod packet;
