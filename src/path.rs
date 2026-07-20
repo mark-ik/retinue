@@ -1,20 +1,26 @@
-//! Path requests.
+//! Path requests and responses.
 //!
 //! When an endpoint wants to reach a destination it has not heard announce, it asks: it
 //! sends a path request to the well-known plain destination `rnstransport.path.request`, and
-//! a transport node that knows a path replies by having the destination announce back toward
-//! the requester. retinue is an endpoint, not a router, so it *sends* path requests and
-//! *ingests* the announces that result; it never answers them.
+//! whoever owns the destination (or a transport node holding its announce) replies with a
+//! *path response*: an ordinary announce whose context byte is [`CTX_PATH_RESPONSE`] rather
+//! than `0`. retinue *sends* path requests, *ingests* the announces that result, and
+//! *answers* path requests for destinations it owns (see [`parse_request`] and the endpoint's
+//! path-response handling). It does not yet answer on behalf of others (no announce cache).
 //!
-//! The packet is a plain data packet:
+//! The request is a plain data packet:
 //!
 //! ```text
 //! destination = trunc16(SHA256(name_hash("rnstransport.path.request")))  = the plain dest
 //! payload     = target_hash(16) || request_tag(16)
 //! ```
 //!
-//! Captured from RNS 1.3.8: `RNS.Transport.request_path` emits exactly this, to destination
-//! `6b9f66014d9853faab220fba47d02761`.
+//! The response is a normal announce with the context byte set to [`CTX_PATH_RESPONSE`].
+//!
+//! Captured from RNS 1.3.8 (oracle/capture_pathreq.py, capture_pathresp.py):
+//! `RNS.Transport.request_path` emits the request above to destination
+//! `6b9f66014d9853faab220fba47d02761`; answering a path request for its own destination, RNS
+//! emits a 167-byte announce with context byte `0x0b`.
 
 use crate::destination::DestinationName;
 use crate::hash::AddressHash;
@@ -22,6 +28,11 @@ use crate::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation
 
 /// Length of the random request tag on a path request.
 pub const TAG_LEN: usize = 16;
+
+/// Context byte marking an announce as a solicited path response rather than a spontaneous
+/// broadcast. Verified against RNS 1.3.8: answering a path request for its own destination,
+/// RNS emits a normal announce carrying this context byte.
+pub const CTX_PATH_RESPONSE: u8 = 0x0b;
 
 /// The well-known destination hash a path request is addressed to.
 pub fn path_request_destination() -> AddressHash {
@@ -51,6 +62,22 @@ pub fn path_request(target: AddressHash, tag: &[u8; TAG_LEN]) -> Packet {
         context: 0,
         payload,
     }
+}
+
+/// Parse an incoming path request, returning the destination hash being sought.
+///
+/// Returns `None` unless `packet` is a plain data packet addressed to
+/// [`path_request_destination`] carrying at least a 16-byte target hash. The trailing request
+/// tag is the requester's private correlation value and is not needed to answer, so it is
+/// ignored here.
+pub fn parse_request(packet: &Packet) -> Option<AddressHash> {
+    if packet.packet_type != PacketType::Data
+        || packet.destination_type != DestinationType::Plain
+        || packet.destination != path_request_destination()
+    {
+        return None;
+    }
+    AddressHash::from_slice(&packet.payload)
 }
 
 #[cfg(test)]
@@ -85,5 +112,33 @@ mod tests {
         let round = Packet::decode(&p.encode()).unwrap();
         assert_eq!(round.payload, p.payload);
         assert_eq!(round.destination_type, DestinationType::Plain);
+    }
+
+    #[test]
+    fn parse_request_recovers_the_target() {
+        let target = AddressHash::from_bytes([0x5A; 16]);
+        let tag = [0x11; TAG_LEN];
+        let req = path_request(target, &tag);
+        // Survives an encode/decode round trip, as it would arriving off the wire.
+        let round = Packet::decode(&req.encode()).unwrap();
+        assert_eq!(parse_request(&round), Some(target));
+    }
+
+    #[test]
+    fn parse_request_rejects_non_requests() {
+        // Right shape, wrong destination.
+        let mut wrong_dest = path_request(AddressHash::from_bytes([1; 16]), &[0; TAG_LEN]);
+        wrong_dest.destination = AddressHash::from_bytes([0xFF; 16]);
+        assert_eq!(parse_request(&wrong_dest), None);
+
+        // Right destination, but an announce, not a data packet.
+        let mut wrong_type = path_request(AddressHash::from_bytes([1; 16]), &[0; TAG_LEN]);
+        wrong_type.packet_type = PacketType::Announce;
+        assert_eq!(parse_request(&wrong_type), None);
+
+        // Addressed correctly but truncated below a full target hash.
+        let mut short = path_request(AddressHash::from_bytes([1; 16]), &[0; TAG_LEN]);
+        short.payload.truncate(8);
+        assert_eq!(parse_request(&short), None);
     }
 }

@@ -36,7 +36,7 @@ use crate::iface::hdlc::{Deframer, frame};
 use crate::link::{
     self, CTX_CHANNEL, CTX_LINKCLOSE, CTX_LINKIDENTIFY, Inbound, Link, LinkMode, LinkTrailer,
 };
-use crate::packet::{Packet, PacketType};
+use crate::packet::{DestinationType, Packet, PacketType};
 use crate::reliable::ReliableChannel;
 use crate::token::IV_LEN;
 
@@ -51,6 +51,13 @@ const DUPLEX_BUF: usize = 64 * 1024;
 /// retransmission of unproven channel packets (`DEFAULT_RETX_TIMEOUT` ticks). One timer per
 /// active reliable link; a production build would pause it when the link is fully idle.
 const RELIABLE_TICK_MS: u64 = 50;
+
+/// How many times an initiator sends its IDENTIFY over the opening retransmit ticks. RNS
+/// sends it once; on a lossy medium a single drop leaves the responder unable to validate our
+/// proofs of the data it sends us, stalling that direction with no way to recover. The wire
+/// protocol has no IDENTIFY ack, so we simply re-send it a bounded few times, which survives
+/// realistic early loss without ever spinning.
+const IDENTIFY_MAX_SENDS: u32 = 4;
 
 /// How long [`Endpoint::open`] waits for a link proof before giving up. Multi-hop setup can
 /// be slow, so this is generous; it exists to bound a setup that will otherwise never
@@ -254,6 +261,10 @@ struct Registered {
     dest: AddressHash,
     /// Whether links to it are reliable (Channel/Buffer + proofs) or best-effort.
     reliable: bool,
+    /// The name and app data this destination announced with, retained so a path request for
+    /// it can be answered by re-announcing it as a path response.
+    name: DestinationName,
+    app_data: Vec<u8>,
 }
 
 /// Shared router state.
@@ -358,6 +369,24 @@ impl Shared {
             pkt.transport = Some(t);
         }
         pkt
+    }
+
+    /// Build a path response for `target` if it is one of our registered destinations: an
+    /// announce for it carrying context [`crate::path::CTX_PATH_RESPONSE`]. Returns `None` if
+    /// we do not own `target` — we hold no announce cache, so we cannot answer for others and
+    /// stay silent rather than guess.
+    fn path_response(&self, target: AddressHash) -> Option<Packet> {
+        let reg = self.registered.lock().unwrap();
+        let r = reg.iter().find(|r| r.dest == target)?;
+        let mut pkt = announce::build(
+            &self.identity,
+            r.name.name_hash(),
+            &rand_hash(),
+            None,
+            &r.app_data,
+        );
+        pkt.context = crate::path::CTX_PATH_RESPONSE;
+        Some(pkt)
     }
 
     /// Record that `dest` is reachable via `iface` at `hops`. Keeps the shortest fresh route,
@@ -582,12 +611,23 @@ impl Endpoint {
 
     fn register_with(&self, name: DestinationName, app_data: &[u8], reliable: bool) {
         let dest = name.destination_hash(self.shared.identity.public());
-        self.shared
-            .registered
-            .lock()
-            .unwrap()
-            .push(Registered { dest, reliable });
+        self.shared.registered.lock().unwrap().push(Registered {
+            dest,
+            reliable,
+            name: name.clone(),
+            app_data: app_data.to_vec(),
+        });
         self.announce(&name, app_data);
+    }
+
+    /// Broadcast a path request for `dest`, asking the network to make it reachable. The
+    /// matching path response is an announce, ingested like any other, which populates the
+    /// path table. Use when a route has gone stale so a subsequent link setup has an
+    /// interface to go out on.
+    pub fn request_path(&self, dest: AddressHash) {
+        let mut tag = [0u8; crate::path::TAG_LEN];
+        fill_random(&mut tag);
+        self.shared.broadcast(crate::path::path_request(dest, &tag));
     }
 
     /// Emit an announce for a destination on every interface.
@@ -797,6 +837,18 @@ fn attach(shared: &Arc<Shared>, stream: TcpStream) -> InterfaceId {
 
 /// Dispatch one inbound packet that arrived on `iface`.
 fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
+    // A path request for a destination we own: answer it with a path response (an announce
+    // carrying context 0x0b) so a peer that lost its route to us can rediscover it. We answer
+    // only for our own destinations; with no announce cache we cannot answer for others.
+    if pkt.packet_type == PacketType::Data
+        && pkt.destination_type == DestinationType::Plain
+        && let Some(target) = crate::path::parse_request(&pkt)
+    {
+        if let Some(resp) = shared.path_response(target) {
+            shared.broadcast(resp);
+        }
+        return;
+    }
     // Transport-node forwarding (announces are re-forwarded in their own arm instead, so
     // they still populate our address book).
     if pkt.packet_type != PacketType::Announce && shared.routing.load(Ordering::Relaxed) {
@@ -1103,9 +1155,13 @@ fn register_reliable_stream(
     };
     let drv = Arc::clone(shared);
     track(shared, async move {
-        if let Some(id_packet) = identify {
-            drv.send_on(iface, id_packet);
+        // Identify to the responder so it can validate our proofs. RNS sends this once; we
+        // re-send it over the first few ticks (in the clock arm below) so a dropped one still
+        // lands on a lossy medium.
+        if let Some(id_packet) = &identify {
+            drv.send_on(iface, id_packet.clone());
         }
+        let mut identify_sends: u32 = 1;
         let mut buf = [0u8; WRITE_CHUNK];
         let mut clock: u64 = 0;
         let mut writer_open = true; // the app's write side is still open
@@ -1158,6 +1214,14 @@ fn register_reliable_stream(
                 // The retransmit clock.
                 _ = interval.tick() => {
                     clock += 1;
+                    // Re-send IDENTIFY over the first few ticks so a dropped one still reaches
+                    // the responder on a lossy medium (bounded; there is no ack to wait on).
+                    if let Some(id_packet) = &identify
+                        && identify_sends < IDENTIFY_MAX_SENDS
+                    {
+                        drv.send_on(iface, id_packet.clone());
+                        identify_sends += 1;
+                    }
                 }
             }
 
@@ -1284,5 +1348,53 @@ mod tests {
         // A different, unseen destination is still accepted.
         let c = AddressHash::from_bytes([0x03; 16]);
         assert!(ep.shared.announce_within_budget(c), "a new destination is accepted");
+    }
+
+    #[tokio::test]
+    async fn answers_a_path_request_for_an_owned_destination() {
+        let ep = Endpoint::new(PrivateIdentity::from_secret_bytes(&[9u8; 64]));
+        let mut iface = ep.attach_interface();
+        let name = crate::destination::DestinationName::new("retinue", ["pathtest"]);
+        let dest = name.destination_hash(ep.identity());
+        ep.register(name, b"hello");
+
+        // Registration broadcasts a spontaneous announce (context 0); drain it.
+        let first = tokio::time::timeout(Duration::from_secs(1), iface.next_outbound())
+            .await
+            .expect("registration announce")
+            .expect("interface open");
+        assert_eq!(first.packet_type, PacketType::Announce);
+        assert_eq!(first.context, 0, "a spontaneous announce has context 0");
+
+        // A peer requests a path to our destination.
+        let sink = iface.sink();
+        assert!(sink.deliver(crate::path::path_request(dest, &[0x77; crate::path::TAG_LEN])));
+
+        // We answer with a path response: an announce for that destination, context 0x0b.
+        let resp = tokio::time::timeout(Duration::from_secs(1), iface.next_outbound())
+            .await
+            .expect("path response emitted")
+            .expect("interface open");
+        assert_eq!(resp.packet_type, PacketType::Announce);
+        assert_eq!(resp.context, crate::path::CTX_PATH_RESPONSE);
+        assert_eq!(resp.destination, dest);
+        // It is a valid announce that reconstructs to our destination and app data.
+        let decoded = Announce::decode(&resp).expect("valid announce");
+        assert_eq!(decoded.destination, dest);
+        assert_eq!(decoded.app_data, b"hello");
+        assert_eq!(decoded.identity.hash(), ep.identity().hash());
+    }
+
+    #[tokio::test]
+    async fn ignores_a_path_request_for_an_unknown_destination() {
+        let ep = Endpoint::new(PrivateIdentity::from_secret_bytes(&[10u8; 64]));
+        let mut iface = ep.attach_interface();
+        let sink = iface.sink();
+        let unknown = AddressHash::from_bytes([0xCC; 16]);
+        assert!(sink.deliver(crate::path::path_request(unknown, &[0; crate::path::TAG_LEN])));
+
+        // We own nothing, hold no cache, so we stay silent.
+        let got = tokio::time::timeout(Duration::from_millis(200), iface.next_outbound()).await;
+        assert!(got.is_err(), "no response for an unknown destination");
     }
 }

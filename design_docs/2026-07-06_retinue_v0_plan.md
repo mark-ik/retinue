@@ -460,12 +460,13 @@ procurement.*
 **2026-07-19 update:** current stable RNode Firmware 1.86 now explicitly lists
 Heltec LoRa32 V3, V4, and T114. Hardware is still required for a black-box opcode
 capture under the provenance policy above, but board support is no longer an
-unknown. A separate GPLv3 Rust port of RNode Firmware is now the accepted second
-lane; a native embedded Retinue node is different again. The host capture must
-land and be tagged before the firmware port begins inspecting upstream source.
-After that oracle, the modem port and embedded endpoint can proceed in parallel;
-the modem is not a prerequisite for removing the host. The lanes and gates are
-separated in
+unknown. The firmware direction is a separate, independently authored
+MIT/Apache Rust radio workspace, not a GPL source port. Shared board, SX1262,
+scheduler, settings, and capacity crates support distinct RNode-compatible,
+native Retinue, and Meshtastic-compatible firmware images. The host capture must
+land and be tagged before permissive compatibility work begins. After that
+oracle, the protocol personalities can proceed in parallel; the modem is not a
+prerequisite for removing the host. The lanes and gates are separated in
 [`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md)
 and refined by
 [`2026-07-19_modem_embedded_and_meshtastic_research.md`](2026-07-19_modem_embedded_and_meshtastic_research.md).

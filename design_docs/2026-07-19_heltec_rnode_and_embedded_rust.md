@@ -1,14 +1,14 @@
 # Heltec, RNode, and embedded Rust
 
-**Status:** accepted direction, 2026-07-19. This extends R10 in the v0 plan.
-The separate GPLv3 Rust RNode port is a decision; implementation has not begun.
+**Status:** accepted direction, revised 2026-07-19. This extends R10 in the v0
+plan. The firmware direction is an independently authored MIT/Apache radio
+workspace, not a GPL source port; implementation has not begun.
 This document does not claim that Retinue or Rust RNode firmware currently runs
 on these boards. The focused follow-up
 [`2026-07-19_modem_embedded_and_meshtastic_research.md`](2026-07-19_modem_embedded_and_meshtastic_research.md)
-corrects the sequencing: after the stock-RNode oracle, the modem port and native
-embedded Retinue are independent moves that can proceed in parallel. It also
-records the independently specified permissive option and the existing
-Meshtastic tunnel.
+corrects the project shape: shared board/radio crates support separate
+RNode-compatible, native Retinue, and Meshtastic-compatible firmware images.
+It also records the optional embedded Retinue-over-Meshtastic image.
 
 ## Decision
 
@@ -28,9 +28,9 @@ Meshtastic tunnel.
 System 1 comes first. It gives Retinue real radio evidence and supplies the
 compatibility oracle for both firmware efforts. Systems 2 and 3 are separate
 follow-ons and can proceed in parallel; a Rust RNode is not a prerequisite for
-native embedded Retinue. The Rust RNode is a committed, separately licensed
-project, not code folded into Retinue. Native embedded Retinue is the system
-that removes the host.
+native embedded Retinue. The Rust RNode is one firmware personality in a
+separate, independently authored MIT/Apache radio workspace that Retinue can
+reuse. Native embedded Retinue is the system that removes the host.
 
 For new hardware, the choices split by purpose:
 
@@ -107,12 +107,12 @@ cryptographic randomness, reliable link defaults, bounded queues and frames,
 resource retry/cancellation, dynamic flow control, announce airtime budgeting,
 and route expiry. A working serial exchange alone does not satisfy the gate.
 
-## Second system: the separate Rust RNode port
+## Second system: the independent Rust RNode-compatible firmware
 
-**Decision, 2026-07-19:** port RNode Firmware to Rust under GPLv3. The working
-repository name is `rnode-firmware-rs`. It is a separate Git repository and
-release product, with RNode Firmware 1.86 as its initial compatibility baseline.
-The name can change before publication without changing this boundary.
+**Revised decision, 2026-07-19:** build an independently specified
+RNode-compatible firmware in a separate MIT/Apache Rust radio workspace. RNode
+Firmware 1.86 remains the first black-box compatibility baseline. This is not a
+source translation and must not use GPL implementation code as a donor.
 
 A Rust modem is plausible on all three boards. Its smallest useful form is:
 
@@ -146,48 +146,42 @@ tested with conservative defaults.
 
 ### Repository and license boundary
 
-RNode Firmware is GPLv3, and the Rust port is GPLv3. It can read, translate, and
-adapt upstream source while retaining its license, notices, and corresponding
-source obligations. This is an open port rather than a clean-room
-reimplementation.
+The separate workspace holds generic board, SX1262, queue, scheduling,
+persistence, and transport crates plus distinct RNode and
+Meshtastic-compatible protocol crates. Retinue consumes the generic embedded
+contracts and supplies its own `no_std` node state machine. Firmware binaries
+compose those parts without making the common crate aware of either protocol.
 
-The boundary is operational as well as organizational:
+The provenance rules are operational:
 
-- `rnode-firmware-rs` contains the derived firmware, board support, boot and
-  update machinery, and firmware-side conformance tests. It is GPLv3.
-- Retinue contains its RNode/KISS host interface under Retinue's existing
-  MIT/Apache license. It does not import or link firmware code.
-- The integration boundary is the RNode byte protocol over USB, BLE, or TCP.
-  Cross-repository tests flash a firmware artifact and treat it as a device.
-- Retinue's initial host implementation and capture corpus land and are tagged
-  before contributors inspect upstream implementation for the port. That gives
-  the host driver a truthful chronological black-box record. Once port work
-  starts, the project must not claim its contributors remain unexposed to the
-  firmware source. GPL source-derived logic stays in the firmware repository;
-  Retinue fixtures record observed device traffic rather than copied code.
-- Release notes pin the upstream RNode version whose behavior is implemented.
-  Upstream changes are reviewed and ported deliberately rather than followed
-  from an unpinned branch.
+- board and radio code comes from hardware documentation and permissive
+  embedded dependencies;
+- RNode behavior comes from the public legacy command table and captures made
+  against pinned stock devices;
+- contributors implementing permissive protocol code do not translate or adapt
+  GPL RNode or Meshtastic firmware source;
+- Retinue's host implementation and capture corpus land before implementation
+  work begins, and release notes pin the stock baseline being matched;
+- cross-repository tests flash artifacts and treat stock and Rust firmware as
+  external devices.
 
-This separation lets Retinue use stock or Rust RNodes interchangeably without
-making firmware a library dependency or changing Retinue's license. It is a
-source and build boundary, not an attempt to hide the port's derivation.
+This separation lets Retinue use stock or Rust RNodes interchangeably while
+also reusing the independently authored radio scheduler in native firmware.
 
-An independent MIT/Apache RNode-compatible implementation is also possible in
-principle, but it is a different project discipline from this accepted GPL
-source port. It cannot translate or adapt GPL firmware code. The focused
-research note explains why that route becomes attractive if modem policy must
-be reused by MIT/Apache embedded Retinue.
+The same workspace can produce a third, Meshtastic-compatible node image.
+Meshtastic publicly documents its raw on-air header, radio settings, encryption,
+managed flooding, ACK/retry, next-hop routing, and client API, and its official
+hardware registry recognizes a non-Meshtastic implementation that supports the
+same frame format. The complete protobuf schemas remain GPLv3, so the
+permissive project must not import or generate from them. Seek a permissive
+schema/specification grant, or use a separately authored field registry and
+black-box corpus subject to legal review.
 
-Meshtastic is now more than a hypothetical alternative bearer. Its official
-port registry assigns `RETICULUM_TUNNEL_APP = 76` to fragmented RNS packets,
-and the GPLv3 `RNS_Over_Meshtastic` project demonstrates the tunnel. It is much
-slower than direct RNode, adds a second routing/retry layer, and still requires a
-host Reticulum implementation attached to a Meshtastic radio. Treat it as a
-compatibility bridge, not a substitute for embedded Retinue. MeshCore and
-LoRaWAN still need their own explicit encapsulations. A generic KISS TNC is
-closer to RNode, but it lacks RNode's standard radio-control session and needs a
-deployment-specific configuration path.
+A single SX1262 should run one selected personality at a time. A reliable
+simultaneous RNode/Reticulum and Meshtastic gateway needs two radios. An optional
+V4 image can instead run embedded Retinue over the Meshtastic bearer using the
+registered `RETICULUM_TUNNEL_APP = 76`; that removes the host but adds a second
+mesh/retry layer and fragment reassembly.
 
 ### Rust-modem done condition
 
@@ -306,22 +300,24 @@ experiments, but PSRAM must not excuse unbounded protocol state.
 2. **Host codec:** land KISS fixtures and a bounded sans-I/O codec.
 3. **RNode session:** configure and exchange frames with a stock device over
    serial; add BLE after serial is stable. Tag the black-box host implementation
-   and its capture corpus before reading upstream firmware implementation.
+   and its capture corpus before permissive compatibility work begins, and keep
+   that implementation team unexposed to upstream firmware source.
 4. **On-air correctness:** satisfy the reliability, entropy, capacity, airtime,
    and route-lifetime gate; pass RNS interoperability over actual LoRa.
-5. **Shared hardware foundation:** before GPL implementation exposure, prove the
-   permissive T114 board and SX1262 primitives from hardware documentation and
-   black-box captures if code reuse with embedded Retinue matters.
-6. **Parallel firmware spikes:** create the separate GPLv3 RNode firmware
-   repository and prove T114 USB CDC + SX1262; independently compile Retinue
-   identity, packet, announce, link, and channel on nRF52840 with measured
-   memory. Neither spike waits for the other.
+5. **Shared hardware foundation:** prove the permissive T114 board, SX1262,
+   settings, queue, and scheduler primitives from hardware documentation and
+   black-box captures.
+6. **Parallel firmware spikes:** prove the independent T114 RNode-compatible
+   image, a minimum Meshtastic-compatible image, and Retinue identity, packet,
+   announce, link, and channel on nRF52840 with measured memory. The protocol
+   personalities share hardware crates but do not depend on one another.
 7. **V4 spike:** prove native USB, SPI, DIO interrupt, entropy, flash settings,
    PSRAM if used, and conservative radio output before choosing its executor.
 8. **Native endpoint:** replace RNode in one board with the executor-neutral node
    and direct radio shell; retain stock RNode as the interoperability peer.
-9. **Optional Meshtastic bridge:** benchmark fragmented 500-byte Reticulum
-   packets under ordinary Meshtastic traffic through a separate GPL adapter.
+9. **Optional embedded Meshtastic bearer:** on V4, benchmark fragmented 500-byte
+   Reticulum packets through the independent Meshtastic personality while
+   ordinary text and telemetry traffic are present.
 
 ## Sources checked 2026-07-19
 
@@ -336,5 +332,6 @@ experiments, but PSRAM must not excuse unbounded protocol state.
 - [`lora-phy` documentation](https://docs.rs/lora-phy/latest/lora_phy/)
 - [RTIC target architectures](https://rtic.rs/dev/book/en/internals/targets.html)
 - [Meshtastic client API](https://meshtastic.org/docs/development/device/client-api/)
-  and [official port registry](https://github.com/meshtastic/protobufs/blob/master/meshtastic/portnums.proto)
-- [`RNS_Over_Meshtastic`](https://github.com/landandair/RNS_Over_Meshtastic)
+  [mesh algorithm](https://meshtastic.org/docs/overview/mesh-algo/), and
+  [official port registry](https://github.com/meshtastic/protobufs/blob/master/meshtastic/portnums.proto)
+- [Official Meshtastic protobuf repository and GPLv3 license](https://github.com/meshtastic/protobufs)

@@ -1,156 +1,262 @@
-# Rust modem, embedded Retinue, and Meshtastic
+# Independent Rust radio firmware and embedded Retinue
 
-**Status:** research verdict, 2026-07-19. This refines
-[`2026-07-19_heltec_rnode_and_embedded_rust.md`](2026-07-19_heltec_rnode_and_embedded_rust.md).
-It does not claim that either firmware exists yet.
+**Status:** research direction, revised 2026-07-19. This replaces the earlier
+interpretation of a GPL source port beside an unrelated embedded Retinue port.
+None of the firmware described here exists yet.
 
 ## Verdict
 
-| Move | Feasible? | Removes the host? | Best first hardware | Main boundary |
+The useful project is an independently authored, MIT/Apache Rust radio
+workspace with a shared embedded crate and distinct protocol personalities:
+
+| Personality | What runs on the board | Removes the host? | First target |
+| --- | --- | --- | --- |
+| RNode-compatible modem | RNode host protocol, modem policy, and SX1262 | No | T114 |
+| Native Retinue node | Retinue identity, links, routing profile, and SX1262 | Yes | T114 small profile; V4 full profile |
+| Meshtastic-compatible node | Meshtastic radio framing, crypto, mesh behavior, and client API | Yes for Meshtastic use | T114 single-purpose image |
+| Retinue over Meshtastic | Embedded Retinue plus the Meshtastic bearer and fragmentation | Yes | V4 experiment |
+
+This is more coherent than making the modem a GPL source port. The RNode,
+Retinue, and Meshtastic-specific behaviors remain separate, while the expensive
+board, radio, scheduling, persistence, and capacity work is shared.
+
+"Could also run Meshtastic" should initially mean that the same crates can
+produce a Meshtastic-compatible firmware image. It should not mean that one
+SX1262 continuously participates in RNode/Reticulum and Meshtastic networks at
+the same time. The protocols can require different frequencies, modulation,
+framing, channel access, and receive schedules. A single radio can listen to
+only one configuration at a time. Runtime time-slicing would miss traffic and
+make airtime policy difficult; reliable simultaneous gateway service needs two
+radios.
+
+Use build-time firmware personalities first. A persisted boot selection can
+come later. Bundling every personality into every T114 image would spend its
+limited flash and RAM without improving interoperability.
+
+## The options, collapsed
+
+Several of the apparent options differ only in which firmware is on the radio
+and where Retinue runs:
+
+| Option | Board runs | Retinue runs | Hostless? | License consequence |
 | --- | --- | --- | --- | --- |
-| Rust RNode-compatible modem | Yes | No | T114 | Replaces stock modem firmware while Retinue still runs elsewhere |
-| Embedded Retinue endpoint | Yes, after a bounded `no_std` split | Yes | T114 for the small profile; V4 for headroom | Replaces both the host stack and modem boundary |
-| Reticulum over Meshtastic | Already demonstrated | No | Any supported Meshtastic board | Tunnels fragmented Reticulum packets through the Meshtastic mesh |
-| Meshtastic applications over Reticulum | Technically possible as a translator | Depends on where the translator runs | Not a firmware-first task | Meshtastic node, channel, ACK, and routing semantics do not map transparently to Reticulum |
+| Native embedded Retinue | Custom Retinue firmware | Board | Yes | MIT/Apache target |
+| Independent `rnode-rs` | Custom RNode-compatible modem | External computer or phone | No | MIT/Apache is plausible with independent provenance |
+| Stock RNode | GPL RNode firmware | External computer or phone | No | Clean device boundary; Retinue stays MIT/Apache |
+| Stock Meshtastic | GPL Meshtastic firmware | External host through an adapter | No | Adapter is GPL if it uses official schemas/client code |
+| Embedded Retinue over Meshtastic | Retinue and Meshtastic bearer in one image | Board | Yes | GPLv3 if it uses official schemas; MIT/Apache only with permissively licensed or independently specified schemas |
+| Official Meshtastic Rust crate | Nothing embedded; it is a Tokio desktop client | External host | No | GPLv3 host adapter; not a firmware foundation |
+| MeshCore firmware | Stock or custom MeshCore node/modem | External host unless Retinue is composed into the image | Depends | MeshCore is MIT and can be reused in the permissive workspace |
 
-The sequencing correction is important: stock RNode is still the first radio
-oracle, but the Rust modem is not a prerequisite for embedded Retinue. After the
-stock-device capture and on-air tests, the two moves can proceed independently.
+This leaves four distinct architectures:
 
-If eliminating a Pi, phone, or laptop is the goal, embedded Retinue is the move
-that does it. A Rust RNode remains a modem attached over USB, BLE, or TCP.
+1. native Retinue directly over the shared radio layer;
+2. an RNode modem, stock or independently implemented, with Retinue elsewhere;
+3. a Meshtastic carrier, stock with a host adapter or combined with embedded
+   Retinue;
+4. a MeshCore carrier or compatibility personality.
 
-## The useful overlap
+The official Meshtastic Rust crate does not add a fifth embedded route. It is a
+GPLv3, Tokio-based desktop client for USB serial, TCP, and optional BLE. It is
+useful inside a GPL host bridge and unsuitable as the `no_std` radio workspace.
 
-The two Rust firmware efforts can share hardware work without becoming one
-product:
+MeshCore is not the same licensing story as Meshtastic. Its embedded C/C++ core
+and example KISS modem are MIT. The Rust workspace can link it through a narrow
+C ABI, port selected pieces to Rust under MIT, or independently implement a
+compatible personality. The architectural question remains whether Retinue
+benefits from MeshCore's routing or merely needs its installed network as a
+bearer; placing one mesh router inside another should be a deliberate
+compatibility mode.
+
+## Workspace boundary
+
+Keep the radio project independent of Retinue. Retinue supplies its eventual
+`no_std` node state machine; the radio project supplies reusable hardware and
+firmware shells:
 
 ```text
-Heltec schematics + Semtech docs + black-box radio captures
-                         |
-        permissive board and radio primitives
-              /                         \
-RNode-compatible firmware          embedded Retinue
-host protocol + modem policy        node state + radio bearer
+                    MIT/Apache radio workspace
+
+Heltec BSPs + SX1262 + clock + entropy + flash + bounded radio scheduler
+                               |
+              +----------------+----------------+
+              |                |                |
+       RNode modem       Meshtastic node   Retinue radio shell
+       USB/BLE/TCP       mesh + client API       |
+                                            retinue-core
+
+optional later image: Meshtastic node + port 76 bearer + retinue-core
 ```
 
-The shared layer can own pins, SPI, reset, busy and interrupt handling, TCXO,
-RF switch and power-amplifier control, radio configuration, entropy access,
-flash primitives, and bounded TX/RX queues. It should use `embedded-hal`,
-`embedded-hal-async`, and `embedded-io` traits where they fit. Executors remain
-in board binaries.
+A plain initial workspace layout is:
 
-The provenance condition is strict. A permissively licensed shared layer must
-be written from hardware documentation, permissive drivers, and black-box
-captures before its authors inspect GPL RNode implementation code. Logic
-translated from RNode Firmware belongs in the GPL firmware repository and
-cannot become the library that MIT/Apache Retinue links into. This is an
-engineering boundary, not legal advice.
+```text
+crates/radio-core          traits, profiles, queues, metadata, policy
+crates/sx126x-radio        permissive SX126x driver integration
+crates/heltec-t114         pins, USB, BLE, flash, entropy, power
+crates/heltec-v3           ESP32-S3 board support
+crates/heltec-v4           native USB, PSRAM, RF frontend and power policy
+crates/rnode-compat        KISS/control session and modem behavior
+crates/meshtastic-compat   independently specified radio and mesh behavior
+firmware/rnode             host-controlled modem image
+firmware/meshtastic        Meshtastic-compatible node image
+firmware/retinue           native Retinue image
+firmware/retinue-mesh      optional Retinue-over-Meshtastic image
+```
 
-## Move A: Rusting the modem
+The names are descriptive placeholders, not product branding.
 
-### What this move is
+The common crate owns:
 
-The firmware turns a Heltec board into a host-controlled data radio. Retinue or
-RNS still owns identity, announces, links, routing, and resources on another
-device. The firmware owns:
+- radio profiles and validated regional limits;
+- SPI, reset, busy, interrupt, TCXO, RF-switch, and PA control;
+- bounded TX/RX queues, receive metadata, channel activity, scheduling, and
+  airtime accounting;
+- injected clock, entropy, persistence, and transport traits;
+- board capabilities and typed capacity or hardware failures.
+
+It does not own RNode commands, Retinue packets, Meshtastic frames, routing,
+application ports, or an async executor. Board binaries can use Embassy, RTIC,
+`esp-hal` async support, or a polling loop without leaking that choice into the
+protocol crates.
+
+An interface in this neighborhood is sufficient:
+
+```rust
+trait Radio {
+    fn configure(&mut self, profile: &RadioProfile) -> Result<(), RadioError>;
+    fn receive(&mut self, now: Instant) -> Result<Option<ReceivedFrame>, RadioError>;
+    fn transmit(&mut self, frame: &[u8], policy: TxPolicy) -> Result<(), RadioError>;
+}
+
+trait Protocol {
+    fn ingest(&mut self, frame: ReceivedFrame, now: Instant) -> Actions;
+    fn poll(&mut self, now: Instant) -> Actions;
+}
+```
+
+The actual API must make returned action storage and queue capacity explicit;
+the sketch only records the ownership split.
+
+## License and provenance
+
+An MIT/Apache result is plausible only as an independent implementation. Do not
+translate, adapt, or link code from RNode Firmware or official Meshtastic
+firmware. Both are GPLv3. Keep these inputs distinct:
+
+| Input | Safe role in the permissive project |
+| --- | --- |
+| Heltec schematics and MCU/Semtech documentation | Hardware implementation |
+| MIT/Apache embedded drivers such as `lora-phy` | Reusable dependency or donor |
+| Published protocol documentation | Independent specification |
+| Captures produced by pinned stock devices | Conformance fixtures and black-box oracle |
+| GPL RNode or Meshtastic source | External oracle only; not implementation input |
+| GPL Meshtastic `.proto` files and generated Rust package | Do not copy, generate from, or depend on them |
+
+The Meshtastic boundary needs special care. The official documentation publicly
+specifies much of the on-air protocol: a 16-byte raw header, sync word `0x2B`,
+encrypted protobuf payload, a 237-byte data ceiling, CSMA/CA, managed flooding,
+ACK/retry behavior, and the version 2.6 next-hop scheme. Its client API also
+documents the serial/TCP framing and `ToRadio`/`FromRadio` flow. That is enough
+to begin an independent compatibility effort.
+
+The complete protobuf schemas and generated packages are in a GPLv3 repository,
+however, and the prose documentation does not fully specify every field and
+state transition. Protocol facts and interoperable wire behavior are different
+from copying an expressive schema or implementation, but the exact boundary is
+a legal question. Before publishing a permissive crate:
+
+1. ask Meshtastic to dual-license the wire schemas under a permissive license,
+   or publish a separate permissive protocol specification;
+2. otherwise have an unexposed implementation team work from public prose,
+   independently recorded captures, and a separately written field registry;
+3. have counsel review the provenance and distribution plan.
+
+Upstream's own hardware registry is encouraging evidence, not a license grant.
+It assigns `ROUTASTIC = 85` to software that "does not run Meshtastic's code"
+but supports the same frame format. That demonstrates that an independent
+compatible implementation is a recognized technical shape.
+
+Use an independent project name. Meshtastic is a registered trademark and its
+policy restricts third-party product names. Documentation can describe protocol
+compatibility with clear non-endorsement language.
+
+### Using GPL wire schemas without relicensing Retinue
+
+Repository separation alone has no licensing effect. If GPL-generated schema
+code and Retinue are linked into one firmware image, that distributed image is
+a combined GPLv3 work. Rust features, static libraries, FFI, or putting the
+crates in separate repositories do not change that practical result.
+
+The clean dependency direction is downstream:
+
+```text
+MIT/Apache projects
+  retinue-core       radio-core       Heltec BSPs
+          \              |              /
+           \             |             /
+            GPLv3 retinue-meshtastic-firmware
+                 + GPLv3 Meshtastic schemas
+```
+
+Retinue and the radio workspace remain MIT/Apache and do not depend on GPL code.
+A separate GPLv3 firmware product depends on them and on the official
+Meshtastic schemas. Apache-2.0 and MIT code can be incorporated into a GPLv3
+work; the combined firmware and its Meshtastic glue are then distributed under
+GPLv3 with corresponding source. This is coherent if a GPL combined image is
+acceptable.
+
+For a host-based system, the GPL component can instead be a sidecar:
+
+```text
+MIT/Apache Retinue <-> small framed packet socket <-> GPL Meshtastic adapter
+                                                   official Rust client/schemas
+```
+
+The GNU GPL FAQ says pipes and sockets normally connect separate programs, while
+also warning that sufficiently intimate exchange can still form one combined
+program. Keep the boundary packet-oriented, independently useful, and
+replaceable, then obtain legal review before distributing the pair. This route
+preserves Retinue's license but preserves the external host too.
+
+The only route to a hostless MIT/Apache Retinue-Meshtastic image is a permissive
+wire contract: an upstream dual-license/specification grant or a defensible
+independent implementation. A separately stored GPL schema crate cannot be
+quietly pulled into the permissive firmware.
+
+## RNode-compatible personality
+
+This image remains a host-controlled data radio. Retinue or RNS elsewhere owns
+identity, announces, links, routing, and resources. The firmware owns:
 
 - USB CDC first, then BLE and optional TCP;
 - KISS framing and the RNode control session;
 - persisted frequency, bandwidth, spreading factor, coding rate, power, and
   regional limits;
-- bounded flow control, errors, readiness, resets, statistics, RSSI/SNR, and
-  queue saturation;
-- SX1262 configuration, channel activity checks, airtime policy, long-packet
-  behavior, transmit scheduling, and receive delivery;
-- board pins, TCXO, RF switching, V4 external power handling, boot, update, and
-  recovery.
+- bounded flow control, readiness, reset, error, queue, RSSI/SNR, and statistics;
+- SX1262 channel activity, airtime, scheduling, receive delivery, and the
+  stock-compatible long-packet behavior needed by Reticulum's 500-byte MTU.
 
-The original RNode hardware page publicly documents KISS framing and a legacy
-command table for data, radio parameters, state, flow control, statistics,
-randomness, firmware version, and ROM access. That is enough to establish the
-shape of an independent client or firmware, but it is not a complete current
-RNode 1.86 specification. Current firmware also supports BLE/TCP transports,
-airtime controls, multi-radio devices, and newer boards. Exact current command
-payloads, state transitions, error behavior, and on-air long-packet behavior
-still need either a GPL source port or black-box capture against pinned stock
-devices.
+The public original-RNode command table establishes the legacy session shape,
+but it is not a complete RNode 1.86 specification. Build a black-box host and
+on-air capture corpus against pinned stock devices. Preserve exact captures and
+the tests derived from them without copying firmware source.
 
-The 500-byte Reticulum MTU matters here. Semtech documents special handling for
-SX1261/2 packets longer than 255 bytes. Compatibility requires reproducing the
-stock RNode behavior, not merely sending raw bytes through `lora-phy`.
+### RNode done condition
 
-### License choices
-
-| Route | License result | Advantage | Cost |
-| --- | --- | --- | --- |
-| Translate or adapt RNode Firmware | GPLv3 firmware | Fastest route to behavioral fidelity; upstream source is available | Derived code cannot be linked into MIT/Apache embedded Retinue |
-| Independently implement observed compatibility | MIT/Apache is plausible | Modem policy and radio bearer can be reused by embedded Retinue | Requires disciplined provenance, hardware captures, and more conformance work |
-| GPL shell over a prior permissive radio/BSP layer | GPLv3 firmware plus reusable hardware primitives | Preserves the accepted source-port route while sharing generic board work | RNode-specific scheduler and air behavior remain unavailable to Retinue unless independently specified |
-
-Apache-2.0 and MIT code can be incorporated into a GPLv3 firmware. The reverse
-does not preserve an Apache-only combined work. The GNU GPL FAQ treats static
-and dynamic linking with a GPL library as a combined work, and the Apache
-Software Foundation describes GPLv3 compatibility as one-way.
-
-The present accepted decision remains coherent: `rnode-firmware-rs` can be a
-separate GPLv3 source port, and Retinue can use the resulting device across the
-byte protocol while staying MIT/Apache. If maximum reuse with embedded Retinue
-is now more important than source-port speed, reopen that decision and make the
-modem an independently specified permissive implementation before anyone reads
-the GPL implementation.
-
-### Target order
-
-1. **T114:** mature nRF52840 Embassy path, native USB, low power, 1 MB flash,
-   and 256 KB RAM. Its limits force honest queue sizing.
-2. **V3:** known ESP32-S3/SX1262 baseline with 8 MB flash and USB-UART.
-3. **V4:** 16 MB flash, 2 MB PSRAM, native USB, changed pins, and a 28 dBm radio
-   path that requires board-specific PA policy.
-
-`lora-phy` is a strong driver candidate. It is MIT, `no_std`, built around
-`embedded-hal-async`, supports SX1261/2, and has Embassy/nRF52840 examples. It
-does not supply the Heltec BSP or RNode modem policy.
-
-### Modem done condition
-
-- The same host conformance suite passes against pinned stock RNode and the
-  Rust firmware without host-side special cases.
+- The same host conformance suite passes against pinned stock RNode and the Rust
+  image without host-side exceptions.
 - Stock and Rust devices exchange 500-byte packets in both directions across
   the selected modulation matrix.
-- Invalid settings, busy timeout, reset, reconnect, full queue, duplicate
-  frames, and interrupted transmission have deterministic outcomes.
-- Frequency, power, airtime, queue, and flow-control policy are persisted
-  settings with safe regional caps.
-- A reproducible image identifies its board revision, protocol baseline,
-  provenance, and license.
-- T114 idle, receive, and transmit current are measured on hardware.
+- Invalid settings, full queues, busy timeout, reset, reconnect, duplicate
+  frames, and interrupted transmissions have deterministic outcomes.
+- Radio, power, airtime, flow-control, and queue policy are persisted settings
+  with safe regional caps.
 
-## Move B: embedding Retinue
+## Native Retinue personality
 
-### Current gap
-
-Retinue is closer to a portable protocol library than Python RNS, but it is not
-currently embedded firmware:
-
-- the crate does not declare `#![no_std]`;
-- `default-features = false` removes Tokio and bzip2, but direct dependency
-  defaults still enable `std` in `ed25519-dalek` and `sha2`;
-- `Endpoint` is a 1,000-line Tokio shell with spawned tasks, sockets,
-  `Arc<Mutex<_>>`, unbounded channels, and growable maps;
-- channel, reliable, and resource state still use growable collections;
-- resources retain parts in memory and compression uses `std::io`;
-- the current bounded reorder window and packet/HDLC MTU checks are useful,
-  but they do not bound endpoint routing, link, interface, or resource state.
-
-The crypto choice is not the blocker. The Dalek crates used here support
-`no_std` when default features are disabled, and the RustCrypto primitives are
-designed for that environment. The blockers are Retinue's collection,
-allocation, I/O, runtime, storage, and capacity contracts.
-
-### Required core shape
-
-The embedded boundary should be a deterministic state machine:
+The independent radio crate does not by itself put Retinue on the board. Retinue
+still needs an executor-neutral, bounded state machine:
 
 ```text
 Node::ingest(interface, packet, now) -> bounded actions and events
@@ -159,144 +265,123 @@ Node::poll(now)                      -> bounded actions and next deadline
 shell supplies: clock, entropy, persistence, radio, USB/BLE, and scheduling
 ```
 
-The first cut can use `no_std + alloc` as a compile and measurement spike. The
-T114 release profile still needs fixed capacities or caller-supplied storage so
-heap exhaustion is an ordinary typed error. V4 PSRAM can increase configured
-limits, but it should not make protocol state unbounded.
+Current Retinue still uses Tokio, `std`, unbounded channels, growable maps and
+queues, and in-memory resource assembly in its live endpoint. A first embedded
+profile must bound links, routes, queues, reliable-channel state, and resource
+windows; inject entropy and time; and stream persistence. `no_std + alloc` is a
+useful measurement spike, not the T114 release capacity contract.
 
-Suggested profiles:
+The direct Retinue radio bearer can reuse the same independently specified
+RNode-compatible modulation, channel-access, and long-packet work without
+emulating the USB/KISS modem boundary.
 
-| Profile | Included | Excluded initially | Board |
-| --- | --- | --- | --- |
-| `endpoint-small` | identity, announces, one to four links, reliable channel, direct radio, small persisted messages | transport routing, bzip2, arbitrary in-memory resources | T114 |
-| `endpoint-full` | larger link/message tables, streaming resources, USB/BLE management | unbounded routing or resource assembly | V4 |
-| `router` | forwarding, bounded route expiry, announce budget, multiple interfaces | unlimited tables | V4 after endpoint proof |
+### Retinue done condition
 
-Direct SX1262 access also needs a defined radio bearer. To interoperate with
-stock RNodes it must match their modulation, channel access, packet boundary,
-long-packet, and receive metadata behavior. This bearer can reuse a permissive
-radio layer only if that layer was independently authored. Otherwise embedded
-Retinue needs its own black-box-derived compatibility implementation.
-
-### Embedded done condition
-
-- `thumbv7em-none-eabihf` builds a `#![no_std]` T114 endpoint profile, and an
+- `thumbv7em-none-eabihf` builds a `#![no_std]` T114 endpoint profile and an
   ESP32-S3 build proves the V4 shell.
 - Linker receipts record flash, static RAM, heap high-water mark, and maximum
-  future/task size.
+  task/future size.
 - Full link, route, queue, and resource tables return typed capacity errors and
   remain live after rejection.
-- Identity and radio settings survive power loss through a versioned atomic
-  flash format.
-- The board announces, establishes a link, and exchanges reliable data directly
-  with pinned RNS and Retinue peers after loss, reordering, and reboot.
-- Hardware receipts cover entropy failure, corrupt flash, malformed frames,
-  radio busy timeout, regional power caps, and measured current.
+- The board announces, links, and exchanges reliable data directly with pinned
+  RNS and Retinue peers after loss, reordering, and reboot.
 
-## Meshtastic and Reticulum
+## Meshtastic-compatible personality
 
-The phrase can mean two opposite stack orders. They should not be conflated.
+This is a third protocol implementation, not a thin setting on the RNode image.
+The minimum useful slice is:
 
-### Reticulum over Meshtastic: feasible now
+1. regional LoRa presets, sync word, preamble, and the raw 16-byte packet header;
+2. channel hash, AES-CTR channel payloads, and a small independent protobuf wire
+   codec for the explicitly supported messages;
+3. packet identity, duplicate suppression, CSMA/CA, managed flooding, hop limits,
+   implicit broadcast ACKs, and direct ACK/retry;
+4. NodeInfo and channel text traffic against stock nodes;
+5. the documented streaming client API over USB, then BLE, so an official app
+   can provision the node and exchange supported messages;
+6. version 2.6 next-hop direct routing and current public-key direct messages
+   after broadcast/channel interoperability is stable.
 
-This already exists. `RNS_Over_Meshtastic` is a GPLv3 Python custom interface
-that connects to a Meshtastic device over serial, BLE, or TCP and uses the
-Meshtastic network as its carrier. Its author reports an expected maximum near
-500 bytes per second and explicitly describes it as slower than RNode, with the
-benefit that ordinary Meshtastic relays can propagate the traffic.
+Do not claim full Meshtastic compatibility from successful LoRa frame exchange.
+The app-facing NodeDB/configuration flow and the mesh's retry, deduplication,
+routing, crypto, and airtime behavior are part of the product contract.
 
-Meshtastic has now registered `RETICULUM_TUNNEL_APP = 76` in its official
-protobuf port registry, with the encoding described as a fragmented RNS packet.
-That turns the idea from a hypothetical encapsulation into a recognized
-integration lane.
+### Meshtastic done condition
 
-The costs are structural:
+- A stock node and the Rust node exchange broadcast text and NodeInfo in both
+  directions through a two-hop stock relay.
+- Stock nodes relay frames from the Rust node, and the Rust node relays stock
+  traffic with bounded duplicate state and measured airtime.
+- A pinned official phone or web client provisions the Rust node and observes
+  supported traffic through the standard client API.
+- Busy channel, duplicate, missing ACK, invalid ciphertext, unknown protobuf
+  field, full NodeDB, reboot, and region-limit cases are deterministic.
+- The release declares its exact compatibility baseline and unsupported
+  messages instead of implying parity with all official modules.
 
-- Reticulum's network MTU remains 500 bytes for compatibility.
-- Meshtastic's registry explicitly defines the RNS encoding as fragmented. The
-  same registry documents a 240-byte ceiling for its raw serial application;
-  the tunnel's exact safe fragment size also depends on its metadata and the
-  pinned Meshtastic version.
-- Meshtastic performs its own flooding, duplicate handling, optional ACK/retry,
-  channel policy, and airtime scheduling around Reticulum's own routing,
-  encryption, proofs, and reliability.
-- Loss of one fragment discards or retries the larger Reticulum packet.
-- It still needs Retinue or RNS on a host attached to a Meshtastic radio. It
-  does not remove the Pi by itself.
+## Retinue over the Meshtastic bearer
 
-This is useful for announces, short messages, control traffic, bootstrap paths,
-and coexistence with an installed Meshtastic mesh. It is a poor first bearer
-for resource transfer or browser synchronization. Performance must be measured
-under normal Meshtastic traffic rather than inferred from a two-node bench.
+Once the Meshtastic personality exists, embedded Retinue can use it without a
+Pi. The official port registry assigns `RETICULUM_TUNNEL_APP = 76` to fragmented
+RNS packets. A combined firmware can fragment Reticulum's 500-byte packets,
+submit them to the local Meshtastic mesh, reassemble them, and feed them directly
+to the Retinue node state machine.
 
-For Retinue, keep the first adapter outside the MIT/Apache library. The official
-Meshtastic Rust client, protobuf package, Python client, and the existing RNS
-interface are GPLv3. A separate GPL bridge process can own those dependencies
-and expose a small framed packet pipe or socket to Retinue. The existing Python
-project is an interoperability oracle, not source to copy into Retinue. A
-process boundary is the strongest practical separation here, but it does not
-replace a license review before distribution.
+This is a compatibility mode, not the first embedded bearer. It runs two mesh
+and reliability layers, loses the larger packet when a fragment is missing, and
+needs memory for Meshtastic NodeDB/deduplication plus Retinue links/routes. Start
+on V4. Measure it before deciding whether a bounded T114 profile is worthwhile.
 
-The bridge done condition is:
+The combined image done condition is exact 500-byte packet round trips over two
+and three stock Meshtastic hops, bounded reassembly memory, deterministic loss
+and duplicate behavior, and measured latency, goodput, retries, current, and
+airtime beside ordinary text and telemetry traffic.
 
-- exact 500-byte packet round trips over two and three Meshtastic hops;
-- bounded fragment count and reassembly memory;
-- timeout, checksum, duplicate, reorder, missing-fragment, reset, and queue-full
-  tests;
-- measured goodput, latency, retransmissions, and airtime beside ordinary text
-  and telemetry traffic;
-- configurable destination, channel, hop limit, ACK policy, fragment timeout,
-  and airtime budget;
-- an explicit GPL process boundary and reproducible dependency set.
+## Board order
 
-### Meshtastic applications over Reticulum: possible, but not transparent
+1. **T114:** prove the common crate and separate RNode, Retinue-small, and
+   Meshtastic-minimum images. Its nRF52840 has the strongest Embassy path and its
+   256 KB RAM forces honest limits.
+2. **V4:** prove native USB, flash, PSRAM, and its board-specific high-power RF
+   path, then try the combined Retinue-over-Meshtastic image.
+3. **V3:** add the conservative ESP32-S3 target after the shared contracts are
+   stable, unless it is the board already available for the stock oracle.
 
-A virtual Meshtastic radio could accept `ToRadio` protobufs from existing apps,
-translate selected messages into Reticulum destinations, and emit `FromRadio`
-events on the receiving side. That does not make a Reticulum node a Meshtastic
-radio. The translator must invent mappings for 32-bit node numbers, channels,
-group keys, broadcasts, hop limits, ACKs, positions, telemetry, store-forward,
-and the Meshtastic node database.
+## Ordered gates
 
-That is a substantial application gateway with lossy semantics. It should be
-built only for a specific compatibility need. For Retinue itself, a native
-message format or an explicit bridge for selected Meshtastic text, position,
-and telemetry messages is cleaner than emulating the full radio API.
-
-## Recommended order
-
-1. Finish the stock-RNode host interface and black-box capture corpus. Prove
-   Retinue on air against pinned RNS before changing firmware.
-2. Build the permissive Heltec/SX1262 hardware primitives from documentation and
-   captures. Do this before GPL source-port work if reuse matters.
-3. Run the modem and embedded spikes in parallel:
-   - T114 USB CDC + SX1262 + bounded queues for the modem;
-   - T114 `no_std` packet, identity, announce, link, and channel build for
-     embedded Retinue;
-   - V4 native USB, entropy, flash, PSRAM, and conservative PA proof.
-4. Choose the modem license deliberately. Keep GPLv3 for a source-derived port;
-   choose MIT/Apache only for an independent compatibility implementation.
-5. Treat Reticulum-over-Meshtastic as an optional external bridge after the
-   direct RNode bearer is measured. It is a compatibility route, not the basis
-   of the embedded architecture.
+1. Buy or select two boards and pin stock RNode and Meshtastic firmware versions.
+2. Record a clean provenance policy before anyone implementing the permissive
+   protocol crates studies GPL implementation source.
+3. Land generic T114 USB, flash, entropy, SX1262 TX/RX, channel activity, bounded
+   queues, settings, and power receipts.
+4. Capture stock RNode host sessions and on-air 500-byte exchanges; pass the
+   independent RNode personality against those fixtures.
+5. Capture documented Meshtastic broadcast text and NodeInfo exchanges; pass the
+   minimum independent personality against stock nodes and an official client.
+6. Extract Retinue's bounded `no_std` node and pass direct on-air link tests.
+7. On V4, compose the Meshtastic bearer with embedded Retinue on port 76 and
+   measure whether the double stack is useful.
 
 ## Sources checked 2026-07-19
 
 - [Original RNode USB and serial command table](https://unsigned.io/hardware/Original_RNode.html)
-- [RNode Firmware 1.86 boards and GPLv3 boundary](https://github.com/markqvist/RNode_Firmware)
+- [RNode Firmware boards and GPLv3 boundary](https://github.com/markqvist/RNode_Firmware)
 - [Reticulum interface manual](https://reticulum.network/manual/interfaces.html)
   and [500-byte MTU reference](https://reticulum.network/manual/reference.html)
-- [Semtech SX1262 resources and long-packet application note listing](https://www.semtech.com/products/wireless-rf/lora-connect/sx1262)
 - [Heltec WiFi LoRa 32 V3/V4 comparison](https://docs.heltec.org/en/node/esp32/wifi_lora_32/index.html)
   and [T114 documentation](https://docs.heltec.org/zh_CN/node/nrf/mesh_node_t114/index.html)
 - [Nordic nRF52840 specifications](https://www.nordicsemi.com/products/nrf52840)
 - [Embassy](https://github.com/embassy-rs/embassy),
   [`esp-hal`](https://github.com/esp-rs/esp-hal), and
   [`lora-phy`](https://docs.rs/lora-phy/latest/lora_phy/)
-- [`ed25519-dalek` `no_std` feature documentation](https://docs.rs/crate/ed25519-dalek/latest/source/README.md)
-- [Meshtastic client API](https://meshtastic.org/docs/development/device/client-api/)
-  and [official port registry](https://github.com/meshtastic/protobufs/blob/master/meshtastic/portnums.proto)
-- [`RNS_Over_Meshtastic`](https://github.com/landandair/RNS_Over_Meshtastic)
-  and [official Meshtastic Rust client](https://github.com/meshtastic/rust)
-- [GNU GPL linking FAQ](https://www.gnu.org/licenses/gpl-faq.en.html)
-  and [Apache-2.0/GPLv3 compatibility](https://www.apache.org/licenses/GPL-compatibility)
+- [Meshtastic mesh algorithm and on-air framing](https://meshtastic.org/docs/overview/mesh-algo/),
+  [encryption](https://meshtastic.org/docs/overview/encryption/), and
+  [client API](https://meshtastic.org/docs/development/device/client-api/)
+- [Official Meshtastic protobuf repository and license](https://github.com/meshtastic/protobufs),
+  [`ROUTASTIC` compatibility marker](https://github.com/meshtastic/protobufs/blob/master/meshtastic/mesh.proto),
+  and [`RETICULUM_TUNNEL_APP`](https://github.com/meshtastic/protobufs/blob/master/meshtastic/portnums.proto)
+- [Meshtastic trademark policy](https://meshtastic.org/docs/legal/licensing-and-trademark/)
+- [Official Meshtastic Rust desktop client](https://github.com/meshtastic/rust)
+- [MeshCore embedded library, KISS modem, and MIT license](https://github.com/meshcore-dev/MeshCore)
+- [GNU GPL FAQ on linking, aggregation, pipes, and sockets](https://www.gnu.org/licenses/gpl-faq.en.html)
+  and [Apache-2.0/GPLv3 one-way compatibility](https://www.apache.org/licenses/GPL-compatibility)

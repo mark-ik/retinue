@@ -1,0 +1,10 @@
+{
+  "_comment": "RNS 1.3.8 path request, captured via oracle/capture_pathreq.py 2026-07-20. A 51-byte Plain-destination Data packet to the well-known rnstransport.path.request destination. Payload = requested_dest_hash(16) || tag(16). The tag is random per request; the sample below is one capture.",
+  "path_request_dest_hash": "6b9f66014d9853faab220fba47d02761",
+  "name_hash": "7926bbe7dd7f9aba88b0",
+  "requested_dest_hash": "00112233445566778899aabbccddeeff",
+  "frame": "08006b9f66014d9853faab220fba47d027610000112233445566778899aabbccddeeffc621e67e07850e883652d60c1a3a4822",
+  "flags": "0x08",
+  "dest_type": "plain",
+  "context": "0x00"
+}

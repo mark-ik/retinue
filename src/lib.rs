@@ -52,6 +52,7 @@ pub mod path;
 pub mod reliable;
 pub mod request;
 pub mod resource;
+pub mod resource_transfer;
 pub mod token;
 
 pub use address_book::{AddressBook, Peer};
