@@ -68,13 +68,18 @@ merecat, so the cap is ours to enforce. Ties into Tulle's duty-cycle gate (see
 the mesh-household doc): one place where airtime discipline is enforced for
 all protocols.
 
-## Side note: RNode commercial licensing
+## Side note: RNode commercial licensing (corrected 2026-07-20)
 
-Separate from FCC: markqvist sells an inexpensive commercial license for RNode
-firmware aimed exactly at businesses flashing/selling RNodes. If v1 flashes
-RNode firmware (before a retinue-derived firmware exists), buy it. GPL also
-permits commercial distribution with source offered; the license is the
-good-citizen move toward the upstream we build on.
+Separate from FCC: there is NO paid commercial license for RNode firmware.
+Commercial use (including selling flashed devices) is granted free of charge,
+conditioned on GPLv3 adherence: up-to-date source upon distribution, prominent
+copyright/license notices, and making users aware of their GPLv3 rights
+(unsigned.io/rnode_firmware, unsigned.io/sell_rnodes). The firmware's own
+Bootstrap Console (console mode via double reset-press) serves the device's
+internal copy of its firmware source, which is in-band source provisioning.
+Merely's v1 complies by keeping notices intact and devices flashable; our own
+future firmware images adopt the same posture (see the licensing ruling in the
+mesh-household doc).
 
 ## Sources
 

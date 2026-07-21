@@ -141,6 +141,42 @@ RNode regardless of the meshes), then Tucket (MIT, cheap, proves the
 manage-foreign-meshes story), then Sennet (heaviest, clean-room), then the
 bearer interfaces (gated on interop per the legitimacy rule).
 
+## Licensing posture (RULED 2026-07-20, evening round)
+
+Considered and decided after reviewing the GPLv3 vibe of comparable projects
+(embedded Reticulum efforts, Sideband/NomadNet/RNode all GPL at the app or
+firmware layer):
+
+1. **All four crates stay MIT OR Apache-2.0.** MPL-2.0 for retinue/tulle was
+   evaluated (file-level share-alike, static-link clean, would keep the
+   implementation uncapturable) and declined for consistency: tucket must match
+   MIT upstream and sennet's reason to exist is being the permissive
+   Meshtastic-compatible implementation, so the whole household stays uniform.
+   GPL at the library root is wrong regardless: these crates sit at the base of
+   a permissive ecosystem, and copyleft only flows upward from there.
+2. **Firmware images are GPLv3.** The flashable artifact (the retinue-derived
+   ESP32/nRF images, and v1's stock RNode firmware) is where GPLv3's teeth
+   matter: the installation-information clause means nobody ships a locked
+   commercial radio. Direction is fine (MIT/Apache libraries flow into a GPL
+   image). Each image should provide a **Bootstrap Console equivalent**: the
+   device serves its own firmware source in-band, as RNode firmware does
+   (console mode, double reset-press, internal source copy). On flash-tight
+   boards (T114, 1MB) where embedding the source does not fit, the fallback is
+   the flasher: merecat archives the (image, source) pair for anything it
+   flashes, so the source offer travels with the tool, and the device carries a
+   pointer.
+3. **RNode firmware commercial terms (verified 2026-07-20):** no paid license
+   exists; commercial use is gratis conditioned on GPLv3 adherence (source on
+   distribution, prominent notices, users told their rights). v1 selling
+   boards with RNode firmware complies by doing exactly that.
+4. **The standard is defended by trademark + fixtures, not the code license.**
+   Public conformance fixtures and the enforced names (retinue, Sennet, Merely)
+   are the compatibility lever; Meshtastic demonstrates GPL does not slow
+   hardware commercialization, its trademark program is the actual control.
+   Qt-style GPL+commercial dual licensing was rejected: it requires a CLA and
+   makes Merely the only party with permissive rights, the exact asymmetry the
+   "everyone gets the same opportunity" ethos condemns.
+
 ## Rejected and benched names (this round)
 
 Rejected: Herald, Dragoman, Legate (all taken on crates.io); Weft (taken, and
