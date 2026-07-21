@@ -54,6 +54,9 @@ pub struct LoRaParams {
     pub coding_rate: CodingRate,
     /// Carrier frequency in Hz (channel identity; not used by the airtime math).
     pub frequency_hz: u32,
+    /// Transmit power in dBm. Capped in code to the certified envelope by policy (the
+    /// region-lock posture); not used by the airtime math.
+    pub tx_power_dbm: u8,
     /// Preamble length in symbols (default 8).
     pub preamble_syms: u16,
     /// Explicit header present (`false` = implicit header, `IH = 1`).
@@ -119,6 +122,7 @@ mod tests {
             bandwidth_hz: bw,
             coding_rate: CodingRate::Cr45,
             frequency_hz: 915_000_000,
+            tx_power_dbm: 7,
             preamble_syms: 8,
             explicit_header: true,
             crc: true,

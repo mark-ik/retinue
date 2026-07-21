@@ -10,3 +10,6 @@ keywords = ["lora", "radio", "mesh", "rnode", "reticulum"]
 categories = ["network-programming", "embedded"]
 
 [dependencies]
+
+[dev-dependencies]
+serde_json = "1.0.151"

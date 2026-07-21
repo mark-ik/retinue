@@ -1,0 +1,1689 @@
+{
+ "_comment": "RNS 1.3.8 RNodeInterface <-> RNode firmware 1.86 (Heltec T114, c2:c7:3c) serial capture via a pyserial tee, 2026-07-21. Config: 915 MHz, BW 125k, SF8, CR5, 7 dBm. Events are timestamped bytes with direction; the early host->rnode events are the KISS init/SetHardware sequence, the announce near the end is a data frame. init_events marks the end of interface init.",
+ "port": "COM5",
+ "config": {
+  "frequency": 915000000,
+  "bandwidth": 125000,
+  "txpower": 7,
+  "spreadingfactor": 8,
+  "codingrate": 5
+ },
+ "init_events": 226,
+ "events": [
+  {
+   "t": 2.3636,
+   "dir": "host->rnode",
+   "hex": "c00873c05000c04800c04900c0"
+  },
+  {
+   "t": 2.4444,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4444,
+   "dir": "rnode->host",
+   "hex": "08"
+  },
+  {
+   "t": 2.4445,
+   "dir": "rnode->host",
+   "hex": "46"
+  },
+  {
+   "t": 2.4445,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4446,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4446,
+   "dir": "rnode->host",
+   "hex": "50"
+  },
+  {
+   "t": 2.4446,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.4446,
+   "dir": "rnode->host",
+   "hex": "56"
+  },
+  {
+   "t": 2.4447,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4447,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4447,
+   "dir": "rnode->host",
+   "hex": "48"
+  },
+  {
+   "t": 2.4447,
+   "dir": "rnode->host",
+   "hex": "70"
+  },
+  {
+   "t": 2.4447,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4448,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.4448,
+   "dir": "rnode->host",
+   "hex": "49"
+  },
+  {
+   "t": 2.4448,
+   "dir": "rnode->host",
+   "hex": "71"
+  },
+  {
+   "t": 2.4448,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.5644,
+   "dir": "host->rnode",
+   "hex": "c0013689cadbdcc0"
+  },
+  {
+   "t": 2.5646,
+   "dir": "host->rnode",
+   "hex": "c0020001e848c0"
+  },
+  {
+   "t": 2.5647,
+   "dir": "host->rnode",
+   "hex": "c00307c0"
+  },
+  {
+   "t": 2.5649,
+   "dir": "host->rnode",
+   "hex": "c00408c0"
+  },
+  {
+   "t": 2.565,
+   "dir": "host->rnode",
+   "hex": "c00505c0"
+  },
+  {
+   "t": 2.5651,
+   "dir": "host->rnode",
+   "hex": "c00601c0"
+  },
+  {
+   "t": 2.6055,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6056,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.6056,
+   "dir": "rnode->host",
+   "hex": "36"
+  },
+  {
+   "t": 2.6056,
+   "dir": "rnode->host",
+   "hex": "89"
+  },
+  {
+   "t": 2.6057,
+   "dir": "rnode->host",
+   "hex": "ca"
+  },
+  {
+   "t": 2.6057,
+   "dir": "rnode->host",
+   "hex": "db"
+  },
+  {
+   "t": 2.6057,
+   "dir": "rnode->host",
+   "hex": "dc"
+  },
+  {
+   "t": 2.6058,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6058,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6058,
+   "dir": "rnode->host",
+   "hex": "02"
+  },
+  {
+   "t": 2.6059,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6059,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.6059,
+   "dir": "rnode->host",
+   "hex": "e8"
+  },
+  {
+   "t": 2.6059,
+   "dir": "rnode->host",
+   "hex": "48"
+  },
+  {
+   "t": 2.6059,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.606,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.606,
+   "dir": "rnode->host",
+   "hex": "03"
+  },
+  {
+   "t": 2.606,
+   "dir": "rnode->host",
+   "hex": "07"
+  },
+  {
+   "t": 2.606,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6061,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6061,
+   "dir": "rnode->host",
+   "hex": "04"
+  },
+  {
+   "t": 2.6061,
+   "dir": "rnode->host",
+   "hex": "08"
+  },
+  {
+   "t": 2.6061,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6061,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6062,
+   "dir": "rnode->host",
+   "hex": "05"
+  },
+  {
+   "t": 2.6062,
+   "dir": "rnode->host",
+   "hex": "05"
+  },
+  {
+   "t": 2.6062,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6062,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6063,
+   "dir": "rnode->host",
+   "hex": "26"
+  },
+  {
+   "t": 2.6063,
+   "dir": "rnode->host",
+   "hex": "08"
+  },
+  {
+   "t": 2.6063,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6063,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.6064,
+   "dir": "rnode->host",
+   "hex": "e8"
+  },
+  {
+   "t": 2.6064,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6064,
+   "dir": "rnode->host",
+   "hex": "12"
+  },
+  {
+   "t": 2.6064,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6065,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6065,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6065,
+   "dir": "rnode->host",
+   "hex": "18"
+  },
+  {
+   "t": 2.6065,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6065,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 2.6066,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6066,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6066,
+   "dir": "rnode->host",
+   "hex": "26"
+  },
+  {
+   "t": 2.6066,
+   "dir": "rnode->host",
+   "hex": "08"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "e8"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "12"
+  },
+  {
+   "t": 2.6067,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6068,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 2.6068,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6068,
+   "dir": "rnode->host",
+   "hex": "18"
+  },
+  {
+   "t": 2.6068,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6068,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 2.6069,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6069,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6069,
+   "dir": "rnode->host",
+   "hex": "26"
+  },
+  {
+   "t": 2.607,
+   "dir": "rnode->host",
+   "hex": "08"
+  },
+  {
+   "t": 2.607,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.607,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.607,
+   "dir": "rnode->host",
+   "hex": "e8"
+  },
+  {
+   "t": 2.607,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6071,
+   "dir": "rnode->host",
+   "hex": "12"
+  },
+  {
+   "t": 2.6071,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6071,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 2.6071,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "18"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "06"
+  },
+  {
+   "t": 2.6072,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 2.6073,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 3.251,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 3.251,
+   "dir": "rnode->host",
+   "hex": "06"
+  },
+  {
+   "t": 3.2511,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 3.2511,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 4.2954,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 4.2955,
+   "dir": "rnode->host",
+   "hex": "27"
+  },
+  {
+   "t": 4.2955,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 4.2956,
+   "dir": "rnode->host",
+   "hex": "5a"
+  },
+  {
+   "t": 4.2956,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 4.5373,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 4.5374,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 4.5374,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5374,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5374,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5375,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5375,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5375,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5375,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5376,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 4.5376,
+   "dir": "rnode->host",
+   "hex": "2e"
+  },
+  {
+   "t": 4.5376,
+   "dir": "rnode->host",
+   "hex": "2c"
+  },
+  {
+   "t": 4.5376,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 4.5376,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 5.743,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 5.743,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 5.743,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.743,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7431,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7431,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7431,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7431,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7431,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7432,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 5.7432,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 5.7432,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 5.7432,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 5.7433,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 7.0292,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 7.0292,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 7.0292,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0292,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0293,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0293,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0293,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0293,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0293,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0294,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 7.0294,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 7.0294,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 7.0294,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 7.0294,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 8.2356,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 8.2356,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 8.2356,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2357,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2357,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2357,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2357,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2358,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2358,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2358,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 8.2358,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 8.2358,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 8.2359,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 8.2359,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 9.3615,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 9.3615,
+   "dir": "rnode->host",
+   "hex": "27"
+  },
+  {
+   "t": 9.3616,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 9.3616,
+   "dir": "rnode->host",
+   "hex": "5b"
+  },
+  {
+   "t": 9.3616,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 9.522,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 9.522,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 9.522,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5221,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5221,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5221,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5221,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5221,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5222,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5222,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 9.5222,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 9.5222,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 9.5222,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 9.5223,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 10.8075,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 10.8076,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 10.8076,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8076,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8076,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8076,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8077,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8077,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8077,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8077,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 10.8077,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 10.8078,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 10.8078,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 10.8078,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 12.0135,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 12.0136,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 12.0136,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0136,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0137,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0137,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0137,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0137,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0137,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0138,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.0138,
+   "dir": "rnode->host",
+   "hex": "2e"
+  },
+  {
+   "t": 12.0138,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 12.0138,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 12.0138,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 12.6568,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 12.6569,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 12.6569,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.6569,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.6569,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.657,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.657,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.657,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.657,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.657,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 12.6571,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 12.6571,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 12.6571,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 12.6571,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 13.1309,
+   "dir": "host->rnode",
+   "hex": "c0000100c86a838512e1979df9f84b35fc12a06c002ee46753af82f436085a1240669cea32462eb4a3276d929c538c40ae37655d6fbc23a69180f535228a603089620bb2d7ef5d9bad57158760506ab3607981e5b382bae6d929920a8219ea08ece45cf2006a5fda99659efddd7a5febd58ceadc8ca03bf3bbfa69a5733138985c1bb3f0e3dd6eccfb4ec8bb35ac77dbdca898cedf5eed9f2d1a034e7a5663614714c3b7dbdd6be1d3ca07c0"
+  },
+  {
+   "t": 13.8626,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 13.8626,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 13.8626,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 13.8627,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 13.8627,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 13.8627,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 13.8627,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 13.8628,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 13.8629,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 14.5862,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 14.5863,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 14.5863,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 14.5863,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 14.5863,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 14.5864,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 14.5864,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 14.5864,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 14.5864,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 14.5864,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 14.5865,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 14.5865,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 14.5865,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 14.5865,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 14.9082,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 14.9082,
+   "dir": "rnode->host",
+   "hex": "27"
+  },
+  {
+   "t": 14.9083,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 14.9083,
+   "dir": "rnode->host",
+   "hex": "5b"
+  },
+  {
+   "t": 14.9083,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 15.8735,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 15.8736,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 15.8736,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 15.8737,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 15.8737,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 15.8737,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 15.8737,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 15.8738,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 15.8738,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 15.8738,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 15.8738,
+   "dir": "rnode->host",
+   "hex": "32"
+  },
+  {
+   "t": 15.8739,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 15.8739,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 15.8739,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 17.0803,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 17.0804,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 17.0804,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 17.0804,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 17.0804,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 17.0805,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 17.0805,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 17.0805,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 17.0805,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 17.0805,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 17.0806,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 17.0806,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 17.0806,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 17.0806,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 18.3668,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 18.3668,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 18.3668,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 18.3669,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 18.3669,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 18.3669,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 18.3669,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 18.3669,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 18.367,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 18.367,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 18.367,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 18.367,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 18.3671,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 18.3671,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 19.5738,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 19.5739,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 19.5739,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 19.5739,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 19.574,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 19.574,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 19.574,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 19.574,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 19.5741,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 19.5741,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 19.5741,
+   "dir": "rnode->host",
+   "hex": "2e"
+  },
+  {
+   "t": 19.5741,
+   "dir": "rnode->host",
+   "hex": "30"
+  },
+  {
+   "t": 19.5741,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 19.5742,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 19.8957,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 19.8958,
+   "dir": "rnode->host",
+   "hex": "27"
+  },
+  {
+   "t": 19.8958,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 19.8958,
+   "dir": "rnode->host",
+   "hex": "5c"
+  },
+  {
+   "t": 19.8958,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 20.8596,
+   "dir": "rnode->host",
+   "hex": "c0"
+  },
+  {
+   "t": 20.8596,
+   "dir": "rnode->host",
+   "hex": "25"
+  },
+  {
+   "t": 20.8596,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 20.8597,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 20.8597,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 20.8597,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 20.8597,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 20.8598,
+   "dir": "rnode->host",
+   "hex": "44"
+  },
+  {
+   "t": 20.8598,
+   "dir": "rnode->host",
+   "hex": "00"
+  },
+  {
+   "t": 20.8598,
+   "dir": "rnode->host",
+   "hex": "01"
+  },
+  {
+   "t": 20.8598,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 20.8598,
+   "dir": "rnode->host",
+   "hex": "2f"
+  },
+  {
+   "t": 20.8599,
+   "dir": "rnode->host",
+   "hex": "ff"
+  },
+  {
+   "t": 20.8599,
+   "dir": "rnode->host",
+   "hex": "c0"
+  }
+ ]
+}

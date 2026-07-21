@@ -109,6 +109,7 @@ mod tests {
                     bandwidth_hz: 125_000,
                     coding_rate: CodingRate::Cr45,
                     frequency_hz: 915_000_000,
+                    tx_power_dbm: 7,
                     preamble_syms: 8,
                     explicit_header: true,
                     crc: true,
