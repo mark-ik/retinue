@@ -13,3 +13,4 @@ categories = ["network-programming", "embedded"]
 
 [dev-dependencies]
 serde_json = "1.0.151"
+serial2 = "0.2.37"
