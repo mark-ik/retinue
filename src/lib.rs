@@ -9,3 +9,13 @@
 //!
 //! This release reserves the name; the crate is under active design.
 //! A sennet is a ceremonial fanfare for a procession.
+//!
+//! # Provenance
+//!
+//! Sennet is a clean-room implementation. Every byte format here comes from one of three
+//! sources only: publicly documented wire and frame layouts, Google's public protobuf wire
+//! standard, or direct observation of bytes a device emits. No third-party protocol source,
+//! schema definition, or client library was consulted. See `PROVENANCE.md`.
+
+pub mod protobuf;
+pub mod stream;
