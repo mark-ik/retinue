@@ -40,6 +40,31 @@ the semantic reconstruction is a separate process gated on counsel review (see
   are the list-shaped parts of the config (repeated entries streamed one frame
   each); the singletons (2, 3, 4, 7, 13) are one-per-device config sections.
 
+## Over-the-air received-packet envelope
+
+A second node transmitted; the observer received packets over the air and streamed them out
+its client API (`capture/capture_airmsg.py` -> `tests/fixtures/meshtastic_airmsg.json`).
+Every received packet is one top-level variant (field **2**, distinct from the config
+variants) wrapping a nested envelope. The observed tree, as bytes (field numbers, wire types,
+and which values held constant across captures), with no meanings attached:
+
+```text
+field 2 (nested)                        the received-packet variant
+  field 1  i32   constant per sender    (a 4-byte id)
+  field 2  i32   constant 0xffffffff    (a 4-byte id; all-ones here)
+  field 4 (nested)                      a sub-message
+    field 1  varint                     (a small tag; differed by message type)
+    field 2 / field 6 (nested)          the innermost payload, whose shape varied by tag
+  field 6  i32   incremented per frame  (monotonic; a counter or time)
+  field 7  i32                          (a 4-byte id)
+  field 9  varint constant 3
+  field 11 varint constant 16
+```
+
+Two of three frames shared an identical inner shape (same tag at `field 4 > field 1`); the
+third had a larger, differently-shaped inner payload. This is the envelope every application
+message rides, whatever its type; it is recorded here only as the shape of the bytes.
+
 ## What comes next (and the discipline for it)
 
 Reconstructing what each variant and its inner fields *mean* is done only from

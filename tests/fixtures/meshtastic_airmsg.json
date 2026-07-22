@@ -1,0 +1,11 @@
+{
+ "_comment": "Live over-the-air packets received by a Meshtastic-compatible observer node and streamed over its client API, captured black-box 2026-07-22. A second node transmitted. frames = raw FromRadio payloads of received packets, hex. Field numbers/wire types are observable facts; meanings are NOT asserted.",
+ "observer_port": "COM7",
+ "config_frame_count": 53,
+ "live_frame_count": 3,
+ "frames": [
+  "12390d64fa6af615ffffffff221f0843121b0d713c606a1214086515c1ca89401d0000000025f89fad3d28df043550ea5bdb3d713c606a4803580a",
+  "124a0d64fa6af615ffffffff22300843122c0d713c606a322508df041df89fad3d2004280338024002500360d8c91068b8c5097888ffffffffffffffff0135518ab2323d713c606a4803580a",
+  "12390d64fa6af615ffffffff221f0843121b0dad3c606a1214086515c1ca89401d0000000025f89fad3d289b053552ae06a63dad3c606a4803580a"
+ ]
+}

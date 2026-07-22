@@ -10,7 +10,11 @@ use std::collections::BTreeMap;
 use sennet::protobuf::{Reader, Value};
 
 fn fixture_frames() -> Vec<Vec<u8>> {
-    let path = format!("{}/tests/fixtures/meshtastic_config.json", env!("CARGO_MANIFEST_DIR"));
+    load_frames("meshtastic_config.json")
+}
+
+fn load_frames(name: &str) -> Vec<Vec<u8>> {
+    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
     let text = std::fs::read_to_string(path).unwrap();
     // Tiny hand parse of the "frames": ["hex", ...] array (no serde dep in this crate).
     let start = text.find("\"frames\"").unwrap();
@@ -100,4 +104,37 @@ fn exactly_one_scalar_completion_variant_marks_the_config_end() {
         1,
         "the config stream has exactly one scalar completion marker"
     );
+}
+
+/// Live over-the-air packets a node received share one top-level variant number (the
+/// received-packet variant), distinct from the config variants, and nest an envelope several
+/// levels deep. Sennet's reader parses all of them; the shape is recorded as fact, unnamed.
+#[test]
+fn over_the_air_packets_share_one_deeply_nested_variant() {
+    let frames = load_frames("meshtastic_airmsg.json");
+    assert!(!frames.is_empty(), "captured over-the-air frames");
+
+    let mut top_numbers = std::collections::BTreeSet::new();
+    for frame in &frames {
+        let fields: Vec<_> = Reader::new(frame).collect();
+        assert_eq!(fields.len(), 1, "each received packet is one variant");
+        top_numbers.insert(fields[0].number);
+
+        // The envelope nests at least three levels: variant -> packet -> payload -> app data.
+        let Value::Len(packet) = fields[0].value else {
+            panic!("received-packet variant is a nested message");
+        };
+        let packet_fields: Vec<_> = Reader::new(packet).collect();
+        // A nested sub-message exists somewhere in the packet (the decoded payload).
+        let has_nested = packet_fields
+            .iter()
+            .any(|f| matches!(f.value, Value::Len(_)));
+        assert!(has_nested, "the packet carries a nested payload message");
+    }
+    assert_eq!(
+        top_numbers.len(),
+        1,
+        "all received packets share one top-level variant, got {top_numbers:?}"
+    );
+    println!("received-packet variant field number: {top_numbers:?}");
 }
