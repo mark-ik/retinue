@@ -80,6 +80,27 @@ That a readable message rode under tag 1 at this path is a direct observation (w
 text). It is recorded as the observed fact it is; the fuller schema — every tag, every message
 type, field names — remains for the gated reconstruction below.
 
+## RF participation vs. observation (hardware finding, 2026-07-22)
+
+Two distinct capabilities, with very different reach on current hardware:
+
+- **Observe / manage** (this crate today): connect to a node's client API over
+  USB/TCP/BLE, read its config and received traffic, drive it. Fully working —
+  the Stream framing and protobuf reader here do it, verified against live
+  devices.
+- **Participate over RF** (be a node on the mesh): requires transmitting the
+  over-the-air frame with Meshtastic's LoRa sync word (`0x2B`). The RNode radio
+  interface (what `tulle` drives) exposes frequency/bandwidth/SF/CR/power but
+  **not the sync word**, and is fixed to Reticulum's. So Sennet cannot join a
+  mesh through an RNode; RF participation needs direct SX1262 PHY control
+  (embedded firmware), which is future work, not this bench.
+
+The transport layer (16-byte header + AES256-CTR) is documented in public
+prose and public third-party analyses; building it clean-room means citing
+those sources or observing a raw frame, never reconstructing from memory
+(which could be tainted by the GPL source). Since it cannot be RF-verified on
+current hardware anyway, it waits for the direct-PHY path.
+
 ## What comes next (and the discipline for it)
 
 Reconstructing what each variant and its inner fields *mean* is done only from
