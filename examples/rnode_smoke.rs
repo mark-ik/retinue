@@ -105,10 +105,10 @@ fn main() {
         // Drain a moment for any TxDone/echo.
         let until = Instant::now() + Duration::from_secs(2);
         while Instant::now() < until {
-            if let Ok(n) = port.read(&mut buf) {
-                if n > 0 {
-                    rnode.on_serial(&buf[..n]);
-                }
+            if let Ok(n) = port.read(&mut buf)
+                && n > 0
+            {
+                rnode.on_serial(&buf[..n]);
             }
         }
         println!("SMOKE TEST PASSED: tulle drove a real RNode online and transmitted.");
