@@ -66,6 +66,22 @@ const FAST_RATE_THRESHOLD: u32 = 10;
 /// real clock; a counter in tests).
 pub const DEFAULT_RETX_TIMEOUT: u64 = 4;
 
+/// The adaptive retransmit timeout is this multiple of the measured EWMA RTT, so the timeout
+/// tracks the medium instead of a fixed tick count: a fast pipe retransmits in a few ticks, a
+/// LoRa link whose round trip is seconds waits proportionally rather than storming the channel
+/// with retransmits before the first proof can return. Only the dynamic channel adapts;
+/// [`Channel::with_params`] keeps the fixed timeout it is given.
+const RETX_RTT_FACTOR: u64 = 2;
+/// The adaptive timeout never drops below this, preserving fast-medium behaviour.
+const RETX_MIN: u64 = 4;
+/// ...nor rises above this, so one wild RTT sample cannot stall the channel indefinitely.
+const RETX_MAX: u64 = 8000;
+
+/// The retransmit timeout implied by an RTT estimate: `RETX_RTT_FACTOR * rtt`, clamped.
+fn retx_from_rtt(rtt: u64) -> u64 {
+    (rtt * RETX_RTT_FACTOR).clamp(RETX_MIN, RETX_MAX)
+}
+
 /// The most out-of-order future envelopes the receiver will hold at once. A well-behaved
 /// sender keeps at most a window's worth in flight (`WINDOW_MAX` = 48), so this is generous
 /// headroom; its purpose is to bound the reorder buffer against a peer that streams only
@@ -169,7 +185,9 @@ impl Channel {
     /// [`WINDOW_INITIAL`] and grows toward the RTT tier's max on sustained proofs,
     /// shrinking on retransmit.
     pub fn new(msgtype: u16) -> Self {
-        let mut channel = Self::with_params(msgtype, WINDOW_INITIAL, DEFAULT_RETX_TIMEOUT);
+        // Start the timeout from the initial RTT estimate (a medium-latency guess), then let
+        // on_proof adapt it to the measured round trip.
+        let mut channel = Self::with_params(msgtype, WINDOW_INITIAL, retx_from_rtt(RTT_MEDIUM));
         channel.dynamic = true;
         channel
     }
@@ -289,6 +307,9 @@ impl Channel {
         // one step per run of clean proofs, capped by the RTT tier.
         let sample = now.saturating_sub(o.last_tx);
         self.rtt = (self.rtt * 7 + sample) / 8;
+        // Track the retransmit timeout to the measured RTT (finding 1 from the first reliable
+        // link over real RF: a fixed timeout storms a slow medium with premature retransmits).
+        self.retx_timeout = retx_from_rtt(self.rtt);
         self.consecutive += 1;
         if self.consecutive >= FAST_RATE_THRESHOLD {
             self.consecutive = 0;
@@ -712,6 +733,71 @@ mod tests {
     #[test]
     fn heavy_loss_still_converges() {
         stream_over_loss(600, 3, 7);
+    }
+
+    /// Count how many envelopes `channel` puts on the wire to deliver `messages` messages over
+    /// a lossless pipe whose one-way delay is `rtt/2` ticks (so a data->proof round trip is
+    /// `rtt` ticks). Each sequence's proof returns once, `rtt` ticks after its first send;
+    /// retransmits issued before then are the waste this measures.
+    fn transmissions_over_rtt(mut channel: Channel, rtt: u64, messages: usize) -> usize {
+        use std::collections::{BTreeMap, HashSet};
+        for m in 0..messages {
+            channel.send(vec![m as u8]);
+        }
+        let mut proof_at: BTreeMap<u64, Vec<u16>> = BTreeMap::new();
+        let mut scheduled: HashSet<u16> = HashSet::new();
+        let mut total = 0usize;
+        for now in 0..2_000_000u64 {
+            if let Some(seqs) = proof_at.remove(&now) {
+                for s in seqs {
+                    channel.on_proof(s, now);
+                }
+            }
+            for env in channel.poll_transmit(now) {
+                total += 1;
+                if scheduled.insert(env.sequence) {
+                    proof_at.entry(now + rtt).or_default().push(env.sequence);
+                }
+            }
+            if channel.send_idle() {
+                break;
+            }
+        }
+        assert!(channel.send_idle(), "the transfer completed");
+        total
+    }
+
+    /// The adaptive retransmit timeout must not storm a slow medium. Over a 1000-tick round
+    /// trip, the dynamic channel keys its timeout off the measured RTT and sends close to one
+    /// transmission per message; a fixed 4-tick timeout retransmits each packet hundreds of
+    /// times before its proof can return. This is the fix for the RF finding, measured.
+    #[test]
+    fn adaptive_timeout_does_not_storm_a_high_rtt_link() {
+        let messages = 16;
+        let rtt = 1000;
+
+        let adaptive = transmissions_over_rtt(Channel::new(STREAM_MSGTYPE), rtt, messages);
+        let fixed_tiny = transmissions_over_rtt(
+            Channel::with_params(STREAM_MSGTYPE, 8, DEFAULT_RETX_TIMEOUT),
+            rtt,
+            messages,
+        );
+
+        // The adaptive channel sends roughly one frame per message (a small startup burst is
+        // allowed while its RTT estimate settles).
+        assert!(
+            adaptive < messages * 3,
+            "adaptive sent {adaptive} for {messages} messages (should be near {messages})"
+        );
+        // The fixed tiny timeout storms: an order of magnitude more, and far worse than adaptive.
+        assert!(
+            fixed_tiny > messages * 10,
+            "fixed-4 sent {fixed_tiny}, expected a retransmit storm"
+        );
+        assert!(
+            fixed_tiny > adaptive * 5,
+            "adaptive {adaptive} should be dramatically leaner than fixed {fixed_tiny}"
+        );
     }
 
     #[test]

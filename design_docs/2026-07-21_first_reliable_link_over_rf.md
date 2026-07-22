@@ -68,6 +68,13 @@ day with one added line (DTR).
 ## Follow-ons
 
 - retinue: RTT-adaptive retransmit timeout for the reliable driver (finding 1).
+  **DONE 2026-07-22.** The channel's retransmit timeout now tracks its measured
+  EWMA RTT (`retx = 2 * rtt`, clamped) instead of a fixed 4 ticks, and the
+  endpoint driver advances its clock in milliseconds (it was advancing by 1 per
+  50 ms tick, so the ms-calibrated RTT tiers and timeout were off by 50x and the
+  window-tiering never actually engaged). A test measures the fix: over a
+  1000-tick round trip the adaptive channel sends ~one frame per message while a
+  fixed 4-tick timeout storms an order of magnitude more.
 - tulle: the real pump (serial transport + pacing + `AirtimeBudget`), promoting
   the scratchpad harness pattern into `tulle` behind a feature, with retinue
   attached via the `Interface` seam.

@@ -1163,6 +1163,10 @@ fn register_reliable_stream(
         }
         let mut identify_sends: u32 = 1;
         let mut buf = [0u8; WRITE_CHUNK];
+        // The reliable channel measures RTT and sizes its retransmit timeout in this clock's
+        // unit, and its RTT tiers are calibrated in milliseconds, so advance the clock by the
+        // real tick period (below) rather than by 1 — otherwise the timeout is off by a factor
+        // of RELIABLE_TICK_MS and either storms or stalls the medium.
         let mut clock: u64 = 0;
         let mut writer_open = true; // the app's write side is still open
         let mut peer_done = false; // the peer signalled end-of-stream (its eof frame)
@@ -1211,9 +1215,9 @@ fn register_reliable_stream(
                         Ok(n) => rc.write(&buf[..n]),
                     }
                 }
-                // The retransmit clock.
+                // The retransmit clock, in milliseconds (one tick = RELIABLE_TICK_MS real time).
                 _ = interval.tick() => {
-                    clock += 1;
+                    clock += RELIABLE_TICK_MS;
                     // Re-send IDENTIFY over the first few ticks so a dropped one still reaches
                     // the responder on a lossy medium (bounded; there is no ack to wait on).
                     if let Some(id_packet) = &identify
