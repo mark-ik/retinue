@@ -138,3 +138,43 @@ fn over_the_air_packets_share_one_deeply_nested_variant() {
     );
     println!("received-packet variant field number: {top_numbers:?}");
 }
+
+/// Descend the received-packet envelope to the decoded sub-message and return its (tag, payload)
+/// — the scalar at field 1 and the bytes at field 2 of the nested message at path 2 > 4.
+fn decoded_tag_and_payload(frame: &[u8]) -> Option<(u64, Vec<u8>)> {
+    let Value::Len(packet) = Reader::new(frame).find(|f| f.number == 2)?.value else {
+        return None;
+    };
+    let Value::Len(data) = Reader::new(packet).find(|f| f.number == 4)?.value else {
+        return None;
+    };
+    let tag = match Reader::new(data).find(|f| f.number == 1)?.value {
+        Value::Varint(v) => v,
+        _ => return None,
+    };
+    let payload = match Reader::new(data).find(|f| f.number == 2)?.value {
+        Value::Len(b) => b.to_vec(),
+        _ => return None,
+    };
+    Some((tag, payload))
+}
+
+/// A real over-the-air text message, captured black-box, is walked to its payload by Sennet's
+/// reader, and that payload is the readable UTF-8 that was sent. This records the one directly
+/// observed semantic fact — the tag under which a readable message rode — as a test; the fuller
+/// schema stays gated (PROVENANCE.md).
+#[test]
+fn a_captured_text_message_decodes_to_readable_utf8() {
+    let frames = load_frames("meshtastic_textmsg.json");
+    assert!(!frames.is_empty(), "a text frame was captured");
+    for frame in &frames {
+        let (tag, payload) = decoded_tag_and_payload(frame).expect("envelope descends to a payload");
+        let text = std::str::from_utf8(&payload).expect("the text payload is valid UTF-8");
+        println!("observed text under tag {tag}: {text:?}");
+        assert!(!text.is_empty());
+        // The tag under which a readable message was observed is small and distinct from the
+        // telemetry tag (67) seen elsewhere. (Directly observed; not a schema claim.)
+        assert!(tag < 10, "the text tag is a small number, observed {tag}");
+        assert_ne!(tag, 67, "distinct from the telemetry tag");
+    }
+}

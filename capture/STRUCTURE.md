@@ -65,6 +65,21 @@ Two of three frames shared an identical inner shape (same tag at `field 4 > fiel
 third had a larger, differently-shaped inner payload. This is the envelope every application
 message rides, whatever its type; it is recorded here only as the shape of the bytes.
 
+## Over-the-air text message
+
+A message sent from a phone app was received over the air by the observer node and streamed
+out its client API (`tests/fixtures/meshtastic_textmsg.json`). Descending the envelope to the
+decoded sub-message (`field 2 > field 4`), its two fields were:
+
+- `field 1` varint = **1** — the tag (distinct from the telemetry tag 67 seen on other
+  packets).
+- `field 2` bytes = the payload, which was **valid readable UTF-8**: the exact message that
+  was sent.
+
+That a readable message rode under tag 1 at this path is a direct observation (we read the
+text). It is recorded as the observed fact it is; the fuller schema — every tag, every message
+type, field names — remains for the gated reconstruction below.
+
 ## What comes next (and the discipline for it)
 
 Reconstructing what each variant and its inner fields *mean* is done only from
