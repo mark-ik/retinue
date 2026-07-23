@@ -35,6 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpInterfaceListener::bind("127.0.0.1:0".parse()?).await?;
     println!("LISTENING {}", listener.local_addr()?.port());
     let mut iface = listener.accept().await?;
+    // RNS 1.3.9 and 1.4.0 can start their TCP reader before interface setup assigns
+    // `ifac_size`. An immediate first frame then tears down an otherwise valid connection.
+    // This delay belongs to the black-box oracle probe, not to Retinue's TCP interface.
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["recv"]).destination_hash(&peer);

@@ -1,4 +1,4 @@
-"""R1 live interop gate: retinue and RNS 1.3.8 over a real TCP connection, both ways.
+"""R1 live interop gate: retinue and RNS 1.4.0 over a real TCP connection, both ways.
 
 This is the R1 done-condition. It is a LOCAL gate, not a CI test: it needs the Python
 oracle. CI replays the committed fixtures instead and needs no Python.
@@ -21,6 +21,7 @@ Run from the oracle/ directory:
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
@@ -126,6 +127,7 @@ def main() -> int:
     )
 
     RNS.Reticulum(configdir=str(cfgdir))
+    exit_code = 1
     try:
         RNS.Transport.register_announce_handler(RetinueAnnounceHandler())
 
@@ -176,14 +178,15 @@ def main() -> int:
         ok = rns_accepted and retinue_accepted
         print("=" * 68)
         print(f"R1 INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.kill()
-        RNS.exit()
-        shutil.rmtree(cfgdir, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfgdir, ignore_errors=True)
+        RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

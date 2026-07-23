@@ -27,9 +27,15 @@ py -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements.txt
 ```
 
-`requirements.txt` pins `rns==1.3.8`. Re-pin deliberately, not on every upstream release:
-the 1.x churn is concentrated in transport-node and routing behaviour, which retinue does
-not implement, while the endpoint wire has been stable across the 1.x line.
+`requirements.txt` pins `rns==1.4.0`, which includes the 1.3.9 `rnsh` security update and
+is the current PyPI release. Re-pin deliberately, not on every upstream release. The
+committed fixture corpus remains labelled 1.3.8 because those files are historical byte
+observations; current compatibility is established by the live gates below.
+
+RNS 1.3.9 and 1.4.0 have an observed `TCPClientInterface.ifac_size` initialization race
+when a connected peer sends its first frame immediately. The direct-TCP Rust probes wait
+250 ms after accept so this matrix measures protocol interoperability instead of RNS
+constructor timing. Retinue's production TCP interface has no such delay.
 
 ## Capture
 
@@ -74,12 +80,14 @@ is a silent, total wire incompatibility.
 ## The live interop gate
 
 ```sh
-./.venv/Scripts/python.exe -u interop_r1.py
+./.venv/Scripts/python.exe -u run_live.py
 ```
 
-The R1 done-condition, and the only test that proves we are actually wire-compatible.
-It starts retinue (`examples/interop_tcp.rs`), points a real RNS `TCPClientInterface`
-at it, and checks **both** directions:
+This runs all eleven live gates in isolated processes: announce, path resolution, links in
+both roles, request/response, endpoint streaming, Resources in both directions (including
+the 2.5 MB segmented cases), and transport routing. `interop_r1.py` is the first gate. It
+starts retinue (`examples/interop_tcp.rs`), points a real RNS `TCPClientInterface` at it,
+and checks **both** directions:
 
 - **retinue -> RNS.** RNS's own announce handler accepts an announce retinue built,
   signed and framed. Reaching the handler at all means it passed RNS's signature
@@ -94,7 +102,8 @@ This is a **local gate**, not CI: CI replays the committed fixtures instead.
 
 | file | what |
 | --- | --- |
-| `requirements.txt` | the pin: `rns==1.3.8` |
+| `requirements.txt` | the current live-oracle pin: `rns==1.4.0` |
+| `run_live.py` | the complete eleven-gate mixed-runtime matrix |
 | `capture.py` | R0 fixtures: identity vector, announces, negatives, a token |
 | `capture_tcp.py` | R1 fixtures: the raw TCP stream, and the framing rules |
 | `interop_r1.py` | the R1 live two-way announce gate |

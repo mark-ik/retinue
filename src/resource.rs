@@ -131,9 +131,20 @@ pub fn proof(data: &[u8], resource_hash: &[u8; 32]) -> [u8; 32] {
 /// Split a sealed transfer token into parts of at most [`SDU`] bytes, and compute the
 /// hashmap over them.
 pub fn split_parts(token: &[u8], random_hash: &[u8]) -> (Vec<Vec<u8>>, Vec<u8>) {
+    split_parts_with_size(token, random_hash, SDU)
+}
+
+/// Split a sealed transfer token with an explicit part ceiling. The default
+/// [`split_parts`] remains wire-compatible with RNS's 464-byte SDU; negotiated
+/// smaller links can use shorter parts without changing resource semantics.
+pub fn split_parts_with_size(
+    token: &[u8],
+    random_hash: &[u8],
+    part_size: usize,
+) -> (Vec<Vec<u8>>, Vec<u8>) {
     let mut parts = Vec::new();
     let mut hashmap = Vec::new();
-    for chunk in token.chunks(SDU) {
+    for chunk in token.chunks(part_size.clamp(1, SDU)) {
         hashmap.extend_from_slice(&map_hash(chunk, random_hash));
         parts.push(chunk.to_vec());
     }
@@ -540,11 +551,11 @@ impl Incoming {
         added
     }
 
-    /// Take a received part (a raw token slice). Matched by its map hash; a part whose map
-    /// hash is not (yet) known is ignored.
+    /// Take a received part (a raw token slice). Returns true only when it adds a
+    /// previously-missing known part; unknown and duplicate parts return false.
     pub fn accept_part(&mut self, part: &[u8]) -> bool {
         let m = map_hash(part, &self.random_hash);
-        if self.order.contains(&m) {
+        if self.order.contains(&m) && !self.parts.contains_key(&m) {
             self.parts.insert(m, part.to_vec());
             true
         } else {
@@ -643,7 +654,6 @@ pub struct Outgoing {
     /// Parts (raw token slices) keyed by map hash.
     by_hash: std::collections::HashMap<[u8; MAPHASH_LEN], Vec<u8>>,
     expected_proof: [u8; 32],
-    hmu_segment: i64,
 }
 
 impl Outgoing {
@@ -655,8 +665,19 @@ impl Outgoing {
         random_hash: [u8; RANDOM_HASH_LEN],
         compressed: bool,
     ) -> Self {
+        Self::new_with_part_size(data, token, random_hash, compressed, SDU)
+    }
+
+    /// Prepare a sender whose resource parts fit a negotiated link MTU.
+    pub fn new_with_part_size(
+        data: &[u8],
+        token: &[u8],
+        random_hash: [u8; RANDOM_HASH_LEN],
+        compressed: bool,
+        part_size: usize,
+    ) -> Self {
         let hash = resource_hash(data, &random_hash);
-        let (parts, _hashmap) = split_parts(token, &random_hash);
+        let (parts, _hashmap) = split_parts_with_size(token, &random_hash, part_size);
         let mut map_hashes = Vec::with_capacity(parts.len());
         let mut by_hash = std::collections::HashMap::new();
         for p in parts {
@@ -676,7 +697,6 @@ impl Outgoing {
             expected_proof: proof(data, &hash),
             map_hashes,
             by_hash,
-            hmu_segment: 1,
         }
     }
 
@@ -700,7 +720,15 @@ impl Outgoing {
 
     /// The advertisement, carrying the first [`HASHMAP_MAX_PARTS`] map hashes.
     pub fn advertisement(&self) -> Advertisement {
-        let n = self.map_hashes.len().min(HASHMAP_MAX_PARTS);
+        self.advertisement_with_hash_limit(HASHMAP_MAX_PARTS)
+    }
+
+    /// Build an advertisement with a caller-selected hashmap window.
+    pub fn advertisement_with_hash_limit(&self, hash_limit: usize) -> Advertisement {
+        let n = self
+            .map_hashes
+            .len()
+            .min(hash_limit.clamp(1, HASHMAP_MAX_PARTS));
         let hashmap: Vec<u8> = self.map_hashes[..n]
             .iter()
             .flat_map(|h| h.iter().copied())
@@ -736,17 +764,28 @@ impl Outgoing {
     /// Build the next hashmap update after `last_map_hash`: the batch of map hashes that
     /// follow it in transfer order. Empty if `last_map_hash` is the final part.
     pub fn hmu_after(&mut self, last_map_hash: &[u8; MAPHASH_LEN]) -> Vec<u8> {
+        self.hmu_after_with_hash_limit(last_map_hash, HASHMAP_MAX_PARTS)
+    }
+
+    /// Build the next hashmap update with a caller-selected hash window.
+    pub fn hmu_after_with_hash_limit(
+        &mut self,
+        last_map_hash: &[u8; MAPHASH_LEN],
+        hash_limit: usize,
+    ) -> Vec<u8> {
         let start = self
             .map_hashes
             .iter()
             .position(|m| m == last_map_hash)
             .map(|i| i + 1)
             .unwrap_or(self.map_hashes.len());
-        // Send the rest of the hashmap in one HMU (fits many parts; a fuller implementation
-        // would batch to the MDU). One HMU per solicit is correct if smaller than the MDU.
-        let batch: Vec<[u8; MAPHASH_LEN]> = self.map_hashes[start..].to_vec();
-        let seg = self.hmu_segment;
-        self.hmu_segment += 1;
+        // An HMU occupies the same 74-hash window as the advertisement. Derive its segment
+        // from the requested map position instead of advancing mutable state: a repeated
+        // solicitation must reproduce the same HMU after packet loss.
+        let hash_limit = hash_limit.clamp(1, HASHMAP_MAX_PARTS);
+        let end = (start + hash_limit).min(self.map_hashes.len());
+        let batch: Vec<[u8; MAPHASH_LEN]> = self.map_hashes[start..end].to_vec();
+        let seg = (start / hash_limit) as i64;
         build_hmu(&self.hash, seg, &batch)
     }
 
@@ -1040,6 +1079,39 @@ mod tests {
         assert_eq!(h.resource_hash, rh);
         assert_eq!(h.segment, 1);
         assert_eq!(h.hashes, hashes);
+    }
+
+    #[test]
+    fn outgoing_hmu_is_bounded_and_idempotent() {
+        let data = vec![0xA5; 64];
+        let mut token = vec![0x5A; SDU * (HASHMAP_MAX_PARTS * 3 + 1)];
+        for (index, part) in token.chunks_mut(SDU).enumerate() {
+            part[..4].copy_from_slice(&(index as u32).to_be_bytes());
+        }
+        let mut outgoing = Outgoing::new(&data, &token, [1, 2, 3, 4], false);
+        let advertisement = outgoing.advertisement();
+        let last_advertised: [u8; MAPHASH_LEN] = advertisement
+            .hashmap
+            .chunks_exact(MAPHASH_LEN)
+            .last()
+            .unwrap()
+            .try_into()
+            .unwrap();
+
+        let first = outgoing.hmu_after(&last_advertised);
+        let first_hmu = parse_hmu(&first).unwrap();
+        assert_eq!(first_hmu.segment, 1);
+        assert_eq!(first_hmu.hashes.len(), HASHMAP_MAX_PARTS);
+        assert_eq!(outgoing.hmu_after(&last_advertised), first);
+
+        let second_hmu = parse_hmu(
+            outgoing
+                .hmu_after(first_hmu.hashes.last().unwrap())
+                .as_slice(),
+        )
+        .unwrap();
+        assert_eq!(second_hmu.segment, 2);
+        assert_eq!(second_hmu.hashes.len(), HASHMAP_MAX_PARTS);
     }
 
     /// The captured RNS HMU decodes to the known structure.

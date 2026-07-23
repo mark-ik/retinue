@@ -20,6 +20,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let endpoint = Endpoint::new(identity);
     let addr = endpoint.listen_tcp("127.0.0.1:0".parse()?).await?;
     println!("LISTENING {}", addr.port());
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Register so inbound link requests to this destination are accepted (also announces
     // once). An inbound request during the re-announce loop is buffered by the router, so

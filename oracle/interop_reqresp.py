@@ -1,4 +1,4 @@
-"""R3 request/response gate: retinue and RNS 1.3.8 exchange requests both ways.
+"""R3 request/response gate: retinue and RNS 1.4.0 exchange requests both ways.
 
   1. retinue -> RNS. retinue requests /echo; RNS's handler answers; retinue matches the
      response to its request by id.
@@ -12,6 +12,7 @@ Run from the oracle/ directory:  ./.venv/Scripts/python.exe -u interop_reqresp.p
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
@@ -71,6 +72,7 @@ def main() -> int:
         encoding="utf-8",
     )
     RNS.Reticulum(configdir=str(cfg))
+    exit_code = 1
     try:
         # Our /echo responder that retinue calls into.
         identity = RNS.Identity.from_bytes(DEST_SEED)
@@ -134,14 +136,15 @@ def main() -> int:
         print("=" * 68)
         ok = retinue_got and answered and rns_got
         print(f"R3 REQUEST/RESPONSE INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.kill()
-        RNS.exit()
-        shutil.rmtree(cfg, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfg, ignore_errors=True)
+        RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

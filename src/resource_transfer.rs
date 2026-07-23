@@ -14,6 +14,8 @@
 //! 0x01 RESOURCE       one part: a raw slice of the sealed token, framed (not re-sealed)
 //! 0x04 RESOURCE_HMU   a hashmap update for a resource with more parts than one advert carries
 //! 0x05 RESOURCE_PRF   the receiver's proof of receipt, framed: resource_hash(32) || proof(32)
+//! 0x06 RESOURCE_ICL   the initiator cancels
+//! 0x07 RESOURCE_RCL   the receiver cancels
 //! ```
 //!
 //! The payload is sealed into the token **once** (`link.seal(content)`), then split into
@@ -29,11 +31,12 @@
 //! stall. A caller (a link task, or a virtual-clock loss test) pumps them.
 
 use crate::link::{
-    CTX_RESOURCE, CTX_RESOURCE_ADV, CTX_RESOURCE_HMU, CTX_RESOURCE_PRF, CTX_RESOURCE_REQ, Link,
+    CTX_RESOURCE, CTX_RESOURCE_ADV, CTX_RESOURCE_HMU, CTX_RESOURCE_ICL, CTX_RESOURCE_PRF,
+    CTX_RESOURCE_RCL, CTX_RESOURCE_REQ, Link,
 };
 use crate::packet::Packet;
 use crate::resource::{
-    Advertisement, Incoming, Outgoing, RANDOM_HASH_LEN, content, parse_hmu, parse_proof,
+    Advertisement, Incoming, Outgoing, RANDOM_HASH_LEN, SDU, content, parse_hmu, parse_proof,
     parse_request,
 };
 use crate::token::IV_LEN;
@@ -43,7 +46,10 @@ use crate::token::IV_LEN;
 pub struct ResourceSender {
     link: Link,
     out: Outgoing,
+    hash_window: usize,
+    started: bool,
     done: bool,
+    canceled: bool,
 }
 
 impl ResourceSender {
@@ -56,23 +62,48 @@ impl ResourceSender {
         iv: &[u8; IV_LEN],
     ) -> Self {
         let token = link.seal(&content(data, &random_hash), iv);
-        let out = Outgoing::new(data, &token, random_hash, false);
+        let part_size = (link.mtu() as usize)
+            .saturating_sub(crate::packet::HEADER_MIN_LEN)
+            .clamp(1, SDU);
+        let out = Outgoing::new_with_part_size(data, &token, random_hash, false, part_size);
+        let mtu = link.mtu() as usize;
+        let mut hash_window = out
+            .total_parts()
+            .min(crate::resource::HASHMAP_MAX_PARTS)
+            .max(1);
+        while hash_window > 1 {
+            let packed = out.advertisement_with_hash_limit(hash_window).pack();
+            let probe = link.sealed_packet(CTX_RESOURCE_ADV, &packed, &[0_u8; IV_LEN]);
+            if probe.encoded_len() <= mtu {
+                break;
+            }
+            hash_window -= 1;
+        }
         Self {
             link,
             out,
+            hash_window,
+            started: false,
             done: false,
+            canceled: false,
         }
     }
 
     /// The advertisement packet, sealed. (Re)send it until the receiver responds.
     pub fn advertisement(&self, iv: &[u8; IV_LEN]) -> Packet {
-        self.link
-            .sealed_packet(CTX_RESOURCE_ADV, &self.out.advertisement().pack(), iv)
+        self.link.sealed_packet(
+            CTX_RESOURCE_ADV,
+            &self
+                .out
+                .advertisement_with_hash_limit(self.hash_window)
+                .pack(),
+            iv,
+        )
     }
 
     /// Handle one inbound packet from the receiver, returning packets to send:
     /// a request yields the requested parts (and, if it solicited more hashmap, an HMU); a
-    /// valid proof completes the transfer and yields nothing.
+    /// valid proof completes the transfer, and a receiver-cancel signal terminates it.
     pub fn on_packet(
         &mut self,
         packet: &Packet,
@@ -86,6 +117,10 @@ impl ResourceSender {
                 let Ok(req) = parse_request(&plain) else {
                     return vec![];
                 };
+                if req.resource_hash != self.out.resource_hash() {
+                    return vec![];
+                }
+                self.started = true;
                 let mut out = Vec::new();
                 // Serve every part whose map hash we hold, framed (already encrypted in-token).
                 for part in self.out.serve(&req) {
@@ -95,7 +130,7 @@ impl ResourceSender {
                 if req.exhausted
                     && let Some(last) = req.last_map_hash
                 {
-                    let hmu = self.out.hmu_after(&last);
+                    let hmu = self.out.hmu_after_with_hash_limit(&last, self.hash_window);
                     out.push(self.link.sealed_packet(CTX_RESOURCE_HMU, &hmu, &iv()));
                 }
                 out
@@ -108,6 +143,10 @@ impl ResourceSender {
                 }
                 vec![]
             }
+            CTX_RESOURCE_RCL => {
+                self.canceled = true;
+                vec![]
+            }
             _ => vec![],
         }
     }
@@ -115,6 +154,16 @@ impl ResourceSender {
     /// Whether the receiver has proved receipt.
     pub fn is_done(&self) -> bool {
         self.done
+    }
+
+    /// Whether a valid receiver request has begun the part exchange.
+    pub fn has_started(&self) -> bool {
+        self.started
+    }
+
+    /// Whether the receiver explicitly canceled this transfer.
+    pub fn is_canceled(&self) -> bool {
+        self.canceled
     }
 }
 
@@ -124,15 +173,26 @@ pub struct ResourceReceiver {
     link: Link,
     inc: Option<Incoming>,
     data: Option<Vec<u8>>,
+    canceled: bool,
+    request_window: usize,
+    outstanding: usize,
 }
 
 impl ResourceReceiver {
     /// A receiver awaiting an advertisement on `link`.
     pub fn new(link: Link) -> Self {
+        Self::with_request_window(link, crate::resource::HASHMAP_MAX_PARTS)
+    }
+
+    /// A receiver that asks for at most `request_window` parts per turn.
+    pub fn with_request_window(link: Link, request_window: usize) -> Self {
         Self {
             link,
             inc: None,
             data: None,
+            canceled: false,
+            request_window: request_window.clamp(1, crate::resource::HASHMAP_MAX_PARTS),
+            outstanding: 0,
         }
     }
 
@@ -153,9 +213,17 @@ impl ResourceReceiver {
                 let Ok(adv) = Advertisement::parse(&plain) else {
                     return vec![];
                 };
-                match Incoming::new(&adv) {
-                    Ok(inc) => self.inc = Some(inc),
+                let incoming = match Incoming::new(&adv) {
+                    Ok(inc) => inc,
                     Err(_) => return vec![],
+                };
+                let is_new = self
+                    .inc
+                    .as_ref()
+                    .is_none_or(|current| current.resource_hash() != incoming.resource_hash());
+                if is_new {
+                    self.inc = Some(incoming);
+                    self.outstanding = 0;
                 }
                 self.next_requests(&mut iv)
             }
@@ -163,11 +231,15 @@ impl ResourceReceiver {
                 let Some(inc) = self.inc.as_mut() else {
                     return vec![];
                 };
-                inc.accept_part(&packet.payload);
+                if inc.accept_part(&packet.payload) {
+                    self.outstanding = self.outstanding.saturating_sub(1);
+                }
                 if inc.is_complete() {
                     self.finish()
-                } else {
+                } else if self.outstanding == 0 {
                     self.next_requests(&mut iv)
+                } else {
+                    vec![]
                 }
             }
             CTX_RESOURCE_HMU => {
@@ -182,14 +254,20 @@ impl ResourceReceiver {
                 }
                 self.next_requests(&mut iv)
             }
+            CTX_RESOURCE_ICL => {
+                self.canceled = true;
+                vec![]
+            }
             _ => vec![],
         }
     }
 
     /// Re-emit the outstanding request (for loss recovery when a request or its parts were
     /// dropped). Empty once complete or before the advertisement.
-    pub fn retransmit(&self, iv: impl FnMut() -> [u8; IV_LEN]) -> Vec<Packet> {
-        if self.data.is_some() {
+    pub fn retransmit(&mut self, iv: impl FnMut() -> [u8; IV_LEN]) -> Vec<Packet> {
+        if self.canceled {
+            return vec![];
+        } else if self.data.is_some() {
             // Already complete: re-prove in case the proof was lost.
             return self.reprove();
         }
@@ -197,21 +275,31 @@ impl ResourceReceiver {
         self.next_requests(&mut iv)
     }
 
+    /// Whether the sender explicitly canceled this transfer.
+    pub fn is_canceled(&self) -> bool {
+        self.canceled
+    }
+
     /// The requests to send now: the known-but-missing parts, or a hashmap solicitation when
     /// the known hashes are collected but more parts remain.
-    fn next_requests(&self, iv: &mut impl FnMut() -> [u8; IV_LEN]) -> Vec<Packet> {
+    fn next_requests(&mut self, iv: &mut impl FnMut() -> [u8; IV_LEN]) -> Vec<Packet> {
         let Some(inc) = self.inc.as_ref() else {
             return vec![];
         };
         let missing = inc.missing_known();
         if !missing.is_empty() {
-            vec![self
-                .link
-                .sealed_packet(CTX_RESOURCE_REQ, &inc.request(&missing), &iv())]
+            let wanted = &missing[..missing.len().min(self.request_window)];
+            self.outstanding = wanted.len();
+            vec![
+                self.link
+                    .sealed_packet(CTX_RESOURCE_REQ, &inc.request(wanted), &iv()),
+            ]
         } else if inc.needs_hmu() {
-            vec![self
-                .link
-                .sealed_packet(CTX_RESOURCE_REQ, &inc.solicit_hmu(), &iv())]
+            self.outstanding = 0;
+            vec![
+                self.link
+                    .sealed_packet(CTX_RESOURCE_REQ, &inc.solicit_hmu(), &iv()),
+            ]
         } else {
             vec![]
         }
@@ -220,7 +308,10 @@ impl ResourceReceiver {
     /// Reassemble, open, verify, and build the proof packet. Records the payload.
     fn finish(&mut self) -> Vec<Packet> {
         let (data, payload) = {
-            let inc = self.inc.as_ref().expect("complete implies an advertisement");
+            let inc = self
+                .inc
+                .as_ref()
+                .expect("complete implies an advertisement");
             let Ok(token) = inc.assemble_token() else {
                 return vec![];
             };
@@ -270,17 +361,21 @@ mod tests {
     use crate::lossy::LossModel;
 
     /// An established link between a sender side and a receiver side.
-    fn link_pair() -> (Link, Link) {
+    fn link_pair_with_mtu(mtu: u32) -> (Link, Link) {
         let server = PrivateIdentity::from_secret_bytes(&[0x22; 64]);
         let trailer = LinkTrailer {
             mode: LinkMode::Aes256Cbc,
-            mtu: 500,
+            mtu,
         };
         let dest = DestinationName::new("retinue", ["res"]).destination_hash(server.public());
         let (pending, request) = PendingLink::open(dest, *server.public(), &[0x33; 64], trailer);
         let (recv_link, proof) = accept(&request, &server, &[0x99; 64], trailer).unwrap();
         let send_link = pending.prove(&proof).unwrap();
         (send_link, recv_link)
+    }
+
+    fn link_pair() -> (Link, Link) {
+        link_pair_with_mtu(500)
     }
 
     fn iv_gen() -> impl FnMut() -> [u8; IV_LEN] {
@@ -305,7 +400,8 @@ mod tests {
         let (send_link, recv_link) = link_pair();
         let data = payload(3000);
         let mut ivg = iv_gen();
-        let mut sender = ResourceSender::publish(send_link, &data, [0xAB, 0xCD, 0xEF, 0x01], &ivg());
+        let mut sender =
+            ResourceSender::publish(send_link, &data, [0xAB, 0xCD, 0xEF, 0x01], &ivg());
         let mut receiver = ResourceReceiver::new(recv_link);
 
         // The receiver gets the advertisement and drives to completion.
@@ -326,6 +422,38 @@ mod tests {
         assert_eq!(receiver.data(), Some(data.as_slice()), "payload recovered");
     }
 
+    #[test]
+    fn negotiated_mtu_bounds_resource_frames() {
+        let (send_link, recv_link) = link_pair_with_mtu(255);
+        let data = payload(4_096);
+        let mut ivg = iv_gen();
+        let mut sender =
+            ResourceSender::publish(send_link, &data, [0x10, 0x20, 0x30, 0x40], &ivg());
+        let mut receiver = ResourceReceiver::with_request_window(recv_link, 1);
+        let mut to_receiver = vec![sender.advertisement(&ivg())];
+        let mut to_sender = Vec::new();
+
+        for _ in 0..500 {
+            for packet in std::mem::take(&mut to_receiver) {
+                assert!(packet.encoded_len() <= 255);
+                to_sender.extend(receiver.on_packet(&packet, &mut ivg));
+            }
+            for packet in std::mem::take(&mut to_sender) {
+                assert!(packet.encoded_len() <= 255);
+                let replies = sender.on_packet(&packet, &mut ivg);
+                assert!(replies.len() <= 1, "one-part request window");
+                to_receiver.extend(replies);
+            }
+            if sender.is_done() && receiver.is_complete() {
+                break;
+            }
+        }
+
+        assert!(sender.has_started());
+        assert!(sender.is_done());
+        assert_eq!(receiver.data(), Some(data.as_slice()));
+    }
+
     /// A multi-part transfer over a lossy pipe, exercising retransmission of the
     /// advertisement, requests, parts, and the proof, and the HMU path for a large hashmap.
     #[test]
@@ -334,7 +462,8 @@ mod tests {
         // Big enough to need many parts and stream the hashmap over more than one HMU.
         let data = payload(45_000);
         let mut ivg = iv_gen();
-        let mut sender = ResourceSender::publish(send_link, &data, [0x01, 0x02, 0x03, 0x04], &ivg());
+        let mut sender =
+            ResourceSender::publish(send_link, &data, [0x01, 0x02, 0x03, 0x04], &ivg());
         let mut receiver = ResourceReceiver::new(recv_link);
 
         let mut fwd = LossModel::new(7).drop_per_mille(150).max_delay_ms(3);
@@ -394,5 +523,23 @@ mod tests {
             Some(data.as_slice()),
             "large payload recovered exactly over loss"
         );
+    }
+
+    #[test]
+    fn resource_cancel_signals_stop_both_roles() {
+        let (send_link, recv_link) = link_pair();
+        let mut ivg = iv_gen();
+        let mut sender =
+            ResourceSender::publish(send_link.clone(), b"cancel me", [1, 2, 3, 4], &ivg());
+        let mut receiver = ResourceReceiver::new(recv_link.clone());
+
+        let receiver_cancel = recv_link.framed_packet(CTX_RESOURCE_RCL, vec![0x11; 32]);
+        sender.on_packet(&receiver_cancel, &mut ivg);
+        assert!(sender.is_canceled());
+
+        let initiator_cancel = send_link.framed_packet(CTX_RESOURCE_ICL, vec![0x22; 32]);
+        receiver.on_packet(&initiator_cancel, &mut ivg);
+        assert!(receiver.is_canceled());
+        assert!(receiver.retransmit(&mut ivg).is_empty());
     }
 }

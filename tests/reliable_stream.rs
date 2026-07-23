@@ -152,9 +152,15 @@ async fn reliable_exchange_survives_loss_including_identify() {
         .await
         .expect("server finished")
         .unwrap();
-    assert_eq!(got_req, payload, "server received the exact request over loss");
+    assert_eq!(
+        got_req, payload,
+        "server received the exact request over loss"
+    );
 
     let mut expected = b"got ".to_vec();
     expected.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-    assert_eq!(resp, expected, "client received the exact response over loss");
+    assert_eq!(
+        resp, expected,
+        "client received the exact response over loss"
+    );
 }

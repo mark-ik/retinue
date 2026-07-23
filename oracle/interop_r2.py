@@ -12,6 +12,7 @@ Run from the oracle/ directory:  ./.venv/Scripts/python.exe -u interop_r2.py
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
@@ -64,6 +65,7 @@ def main() -> int:
         encoding="utf-8",
     )
     RNS.Reticulum(configdir=str(cfg))
+    exit_code = 1
     try:
         # Host the target destination this transport node knows about.
         target_identity = RNS.Identity.from_bytes(TARGET_SEED)
@@ -97,14 +99,15 @@ def main() -> int:
         print("=" * 68)
         ok = announced_self and sent_request and resolved
         print(f"R2 INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
             proc.kill()
-        RNS.exit()
-        shutil.rmtree(cfg, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfg, ignore_errors=True)
+        RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

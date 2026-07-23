@@ -39,7 +39,7 @@
 
 use x25519_dalek::PublicKey as XPublicKey;
 
-use crate::hash::{AddressHash, ADDRESS_HASH_LEN};
+use crate::hash::{ADDRESS_HASH_LEN, AddressHash};
 use crate::identity::{IDENTITY_LEN, Identity, KEY_LEN, PrivateIdentity, SIGNATURE_LEN};
 use crate::packet::{DestinationType, HeaderType, Packet, PacketType, Propagation};
 use crate::token::{DerivedKeys, IV_LEN};
@@ -937,7 +937,11 @@ mod tests {
                 .try_into()
                 .unwrap();
         let me = PrivateIdentity::from_secret_bytes(&seed);
-        assert_eq!(me.public().to_public_bytes(), public, "pubkey derivation matches RNS");
+        assert_eq!(
+            me.public().to_public_bytes(),
+            public,
+            "pubkey derivation matches RNS"
+        );
         let sig = me.sign(&identify_signed_message(link_id, &public));
         assert_eq!(
             hex::encode(sig),
@@ -951,7 +955,10 @@ mod tests {
     #[test]
     fn identify_round_trips_over_a_link() {
         let dest_identity = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
-        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let trailer = LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        };
         let (pending, request) = PendingLink::open(
             DestinationName::new("retinue", ["test"]).destination_hash(dest_identity.public()),
             *dest_identity.public(),
@@ -964,10 +971,17 @@ mod tests {
         let me = PrivateIdentity::from_secret_bytes(&[0x77; 64]);
         let pkt = initiator.identify_packet(&me, &[0x01; 16]);
         let learned = responder.read_identify(&pkt).expect("valid identify");
-        assert_eq!(learned.hash(), me.public().hash(), "responder learns the initiator");
+        assert_eq!(
+            learned.hash(),
+            me.public().hash(),
+            "responder learns the initiator"
+        );
 
         let mut bad = pkt.clone();
         *bad.payload.last_mut().unwrap() ^= 0x01;
-        assert!(responder.read_identify(&bad).is_none(), "tampered identify rejected");
+        assert!(
+            responder.read_identify(&bad).is_none(),
+            "tampered identify rejected"
+        );
     }
 }

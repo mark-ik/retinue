@@ -1,4 +1,4 @@
-"""R3 live link gate: retinue establishes an encrypted link with RNS 1.3.8, both ways.
+"""R3 live link gate: retinue establishes an encrypted link with RNS 1.4.0, both ways.
 
 The R3 done-condition. retinue (the Rust example link_interop) is the initiator; a real RNS
 is the responder. Proves, over a live TCP connection:
@@ -18,6 +18,7 @@ Run from the oracle/ directory:
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
@@ -76,6 +77,7 @@ def main() -> int:
         encoding="utf-8",
     )
     RNS.Reticulum(configdir=str(cfg))
+    exit_code = 1
     try:
         identity = RNS.Identity.from_bytes(SEED)
 
@@ -115,14 +117,15 @@ def main() -> int:
         print("=" * 68)
         ok = established_ok and rns_decrypted and retinue_decrypted and idle_survived
         print(f"R3 LINK INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        RNS.exit()
-        shutil.rmtree(cfg, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfg, ignore_errors=True)
+        RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

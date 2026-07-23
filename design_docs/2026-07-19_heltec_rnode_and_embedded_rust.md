@@ -94,7 +94,7 @@ This gets on air without changing Endpoint ownership.
 - Two supported Heltec boards run a pinned RNode firmware release.
 - Retinue configures each modem from persisted settings and rejects invalid or
   unsupported settings visibly.
-- A Retinue endpoint and the RNS 1.3.8 oracle exchange announces, establish a
+- A Retinue endpoint and the current pinned RNS oracle exchange announces, establish a
   link, and transfer a reliable stream in both directions over LoRa.
 - Disconnect, malformed frame, modem reset, queue saturation, and packet loss
   have deterministic tests and observable errors.
@@ -284,7 +284,7 @@ experiments, but PSRAM must not excuse unbounded protocol state.
 - Linker output records flash, static RAM, heap high-water mark, and worst-case
   task/future size. Capacity exhaustion returns a typed error and is tested.
 - The board creates or loads an identity, announces directly over SX1262,
-  establishes a link with RNS 1.3.8 or host Retinue, and exchanges reliable data
+  establishes a link with the current pinned RNS oracle or host Retinue, and exchanges reliable data
   after induced loss and reboot.
 - Radio and protocol settings survive power loss atomically and can be changed
   without reflashing firmware.

@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpInterfaceListener::bind("127.0.0.1:0".parse()?).await?;
     println!("LISTENING {}", listener.local_addr()?.port());
     let mut iface = listener.accept().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     // Announce our responder destination so RNS can call us back.
     let our_id = PrivateIdentity::from_secret_bytes(&OUR_SEED);

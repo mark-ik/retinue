@@ -16,6 +16,7 @@ tokio = ["dep:tokio", "dep:getrandom"]
 # bz2 for resources. RNS compresses resource payloads by default, so full interop needs
 # it; the pure-Rust libbz2-rs-sys backend keeps this a C-free dependency.
 compression = ["dep:bzip2"]
+tulle-radio = ["tokio", "dep:tulle"]
 
 [dependencies]
 aes = "0.9.1"
@@ -41,6 +42,7 @@ hkdf = "0.12"
 hmac = "0.12"
 sha2 = "0.10"
 tokio = { version = "1", features = ["net", "io-util", "sync", "rt", "time", "macros"], optional = true }
+tulle = { version = "0.0.1", path = "../tulle", features = ["serial-async"], optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 
 [dev-dependencies]
@@ -133,6 +135,10 @@ required-features = ["tokio"]
 name = "transport_node"
 required-features = ["tokio"]
 
+[[example]]
+name = "tulle_headed"
+required-features = ["tulle-radio"]
+
 [[test]]
 name = "endpoint_multi"
 required-features = ["tokio"]
@@ -144,3 +150,11 @@ required-features = ["tokio"]
 [[test]]
 name = "reliable_stream"
 required-features = ["tokio"]
+
+[[test]]
+name = "endpoint_resource"
+required-features = ["tokio"]
+
+[[test]]
+name = "tulle_interface"
+required-features = ["tulle-radio"]

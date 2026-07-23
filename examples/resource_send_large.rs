@@ -36,6 +36,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = TcpInterfaceListener::bind("127.0.0.1:0".parse()?).await?;
     println!("LISTENING {}", listener.local_addr()?.port());
     let mut iface = listener.accept().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
 
     let peer = *PrivateIdentity::from_secret_bytes(&DEST_SEED).public();
     let dest = DestinationName::new("retinue", ["recv"]).destination_hash(&peer);

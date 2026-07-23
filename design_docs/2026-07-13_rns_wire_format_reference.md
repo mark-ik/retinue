@@ -1,11 +1,14 @@
 # RNS 1.x wire format reference (retinue's ground truth)
 
-**Status (2026-07-13, amended):** first consolidated wire reference. Pinned to **RNS 1.3.8**.
+**Status (2026-07-22, amended):** first consolidated wire reference. The byte-fixture
+corpus is pinned to **RNS 1.3.8**; current live compatibility is verified against
+**RNS 1.4.0**.
 Assembled from the public-domain Reticulum manual and the MIT Beechat crate
 (`reticulum-0.1.0`), then adversarially reviewed.
 
 **Amendment: the oracle now exists, and R0 is settled against it.** `oracle/capture.py`
-drives RNS 1.3.8 as a black box and writes `tests/fixtures/`. The R0 surface (identity,
+drove RNS 1.3.8 as a black box and wrote `tests/fixtures/`. The live gates use the current
+RNS 1.4.0 pin. The R0 surface (identity,
 hashing, destination naming, the packet header, announces, and the identity token) is no
 longer inference: retinue's announces are byte-identical to RNS's from the same inputs,
 and retinue decrypts tokens RNS encrypted to it. See **section 0** below for the facts the

@@ -149,6 +149,9 @@ struct Outstanding {
 pub struct Channel {
     msgtype: u16,
     window: u32,
+    /// Caller-selected ceiling for dynamic growth. A value of one serializes
+    /// data/proof turns on strict half-duplex media.
+    max_window: u32,
     retx_timeout: u64,
     /// Whether the window sizes dynamically. Off for a fixed window (`with_params`).
     dynamic: bool,
@@ -189,6 +192,36 @@ impl Channel {
         // on_proof adapt it to the measured round trip.
         let mut channel = Self::with_params(msgtype, WINDOW_INITIAL, retx_from_rtt(RTT_MEDIUM));
         channel.dynamic = true;
+        channel.max_window = WINDOW_MAX;
+        channel
+    }
+
+    /// A dynamic channel whose first retransmit estimate is tuned to the selected medium.
+    /// Subsequent proofs still adapt the estimate from measured round-trip time.
+    pub fn with_initial_rtt(msgtype: u16, initial_rtt: u64) -> Self {
+        Self::with_initial_rtt_and_max_window(msgtype, initial_rtt, WINDOW_MAX)
+    }
+
+    /// A dynamic channel with medium-specific RTT and send-window policy.
+    ///
+    /// `max_window = 1` is useful for strict half-duplex radios: the sender waits
+    /// for each proof before transmitting the next frame, so a receiver's proof
+    /// cannot collide with a second in-flight data frame.
+    pub fn with_initial_rtt_and_max_window(
+        msgtype: u16,
+        initial_rtt: u64,
+        max_window: u32,
+    ) -> Self {
+        let initial_rtt = initial_rtt.max(1);
+        let max_window = max_window.clamp(1, WINDOW_MAX);
+        let mut channel = Self::with_params(
+            msgtype,
+            WINDOW_INITIAL.min(max_window),
+            retx_from_rtt(initial_rtt),
+        );
+        channel.dynamic = true;
+        channel.rtt = initial_rtt;
+        channel.max_window = max_window;
         channel
     }
 
@@ -198,6 +231,7 @@ impl Channel {
         Self {
             msgtype,
             window: window.max(1),
+            max_window: window.max(1),
             retx_timeout,
             dynamic: false,
             consecutive: 0,
@@ -213,21 +247,23 @@ impl Channel {
 
     /// The RTT tier's window ceiling, from the current RTT estimate.
     fn tier_max(&self) -> u32 {
-        match self.rtt {
+        let tier = match self.rtt {
             r if r <= RTT_FAST => WINDOW_MAX_FAST,
             r if r <= RTT_MEDIUM => WINDOW_MAX_MEDIUM,
             r if r <= RTT_SLOW => WINDOW_MAX_SLOW,
             _ => WINDOW_MIN,
-        }
+        };
+        tier.min(self.max_window)
     }
 
     /// The RTT tier's shrink floor, from the current RTT estimate.
     fn tier_min(&self) -> u32 {
-        match self.rtt {
+        let tier = match self.rtt {
             r if r <= RTT_FAST => WINDOW_MIN_LIMIT_FAST,
             r if r <= RTT_MEDIUM => WINDOW_MIN_LIMIT_MEDIUM,
             _ => WINDOW_MIN_LIMIT_SLOW,
-        }
+        };
+        tier.min(self.max_window).max(1)
     }
 
     /// The current send window.
@@ -285,8 +321,12 @@ impl Channel {
 
         // A retransmit means loss (or a stall): back the window off toward the tier floor.
         if self.dynamic && retransmitted {
-            let floor = self.tier_min().max(WINDOW_MIN);
-            self.window = self.window.saturating_sub(WINDOW_FLEXIBILITY).max(floor);
+            let floor = self.tier_min();
+            self.window = self
+                .window
+                .saturating_sub(WINDOW_FLEXIBILITY)
+                .max(floor)
+                .min(self.max_window);
             self.consecutive = 0;
         }
 
@@ -467,6 +507,32 @@ impl Buffer {
     /// A buffer with the default channel and chunk size, stream id 0 both ways.
     pub fn new() -> Self {
         Self::with_channel(Channel::new(STREAM_MSGTYPE), DEFAULT_CHUNK)
+    }
+
+    /// A default dynamic channel with an explicit application chunk ceiling.
+    pub fn with_max_chunk(max_chunk: usize) -> Self {
+        Self::with_channel(Channel::new(STREAM_MSGTYPE), max_chunk)
+    }
+
+    /// A buffer whose channel starts with a medium-specific RTT estimate.
+    pub fn with_initial_rtt(initial_rtt: u64) -> Self {
+        Self::with_channel(
+            Channel::with_initial_rtt(STREAM_MSGTYPE, initial_rtt),
+            DEFAULT_CHUNK,
+        )
+    }
+
+    /// A buffer whose dynamic channel is capped for the selected medium.
+    pub fn with_initial_rtt_and_max_window(initial_rtt: u64, max_window: u32) -> Self {
+        Self::with_policy(initial_rtt, max_window, DEFAULT_CHUNK)
+    }
+
+    /// A buffer with explicit RTT, dynamic-window ceiling, and application chunk size.
+    pub fn with_policy(initial_rtt: u64, max_window: u32, max_chunk: usize) -> Self {
+        Self::with_channel(
+            Channel::with_initial_rtt_and_max_window(STREAM_MSGTYPE, initial_rtt, max_window),
+            max_chunk,
+        )
     }
 
     /// A buffer over an explicit channel and chunk size, stream id 0 both ways.
@@ -798,6 +864,23 @@ mod tests {
             fixed_tiny > adaptive * 5,
             "adaptive {adaptive} should be dramatically leaner than fixed {fixed_tiny}"
         );
+    }
+
+    #[test]
+    fn max_window_one_serializes_half_duplex_turns() {
+        let mut channel = Channel::with_initial_rtt_and_max_window(STREAM_MSGTYPE, 5_000, 1);
+        channel.send(vec![1]);
+        channel.send(vec![2]);
+
+        let first = channel.poll_transmit(0);
+        assert_eq!(first.len(), 1);
+        assert_eq!(channel.window(), 1);
+        assert!(channel.poll_transmit(1).is_empty());
+
+        channel.on_proof(first[0].sequence, 2);
+        let second = channel.poll_transmit(2);
+        assert_eq!(second.len(), 1);
+        assert_eq!(channel.window(), 1);
     }
 
     #[test]

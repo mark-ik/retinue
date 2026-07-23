@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("LISTENING {port}");
 
     let mut iface = listener.accept().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
     println!("ACCEPTED {}", iface.peer_addr()?);
 
     // --- our direction: announce ourselves, and see whether RNS accepts it.

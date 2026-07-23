@@ -10,3 +10,6 @@ pub mod hdlc;
 
 #[cfg(feature = "tokio")]
 pub mod tcp;
+
+#[cfg(feature = "tulle-radio")]
+pub mod tulle;

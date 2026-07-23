@@ -11,7 +11,7 @@ in a real RNS mesh.
 Run from the oracle/ directory:  ./.venv/Scripts/python.exe -u interop_transport_node.py
 """
 from __future__ import annotations
-import os, re, shutil, subprocess, sys, tempfile, threading, time
+import atexit, os, re, shutil, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 import RNS
 
@@ -49,7 +49,9 @@ def main() -> int:
     # 2. retinue responder behind the hub.
     resp = spawn("link_peer", {"RETINUE_ROLE": "responder", "RETINUE_ADDR": f"127.0.0.1:{HUB_PORT}"},
                  sink, "resp")
-    time.sleep(2.0)
+    # Let the responder attach, but bring up the RNS leaf while its six-announcement burst
+    # is still running. Waiting for the burst to nearly finish made this gate scheduler-racy.
+    time.sleep(0.5)
 
     # 3. RNS leaf: connect to the retinue hub, learn the responder, open a link, send data.
     cfg = Path(tempfile.mkdtemp(prefix="retinue-rnsleaf-"))
@@ -93,9 +95,12 @@ def main() -> int:
     print(f"RNS learned the responder via the retinue node: {linked}")
     print(f"RNS link + echo through the retinue node:       {echo_ok}")
     print("=" * 68)
-    print(f"R7 RNS-ROUTES-THROUGH-RETINUE: {'PASS' if (linked and echo_ok) else 'FAIL'}")
-    RNS.exit(); shutil.rmtree(cfg, ignore_errors=True)
-    return 0 if (linked and echo_ok) else 1
+    ok = linked and echo_ok
+    print(f"R7 RNS-ROUTES-THROUGH-RETINUE: {'PASS' if ok else 'FAIL'}")
+    exit_code = 0 if ok else 1
+    atexit.register(shutil.rmtree, cfg, ignore_errors=True)
+    RNS.exit(exit_code)
+    return exit_code
 
 
 if __name__ == "__main__":

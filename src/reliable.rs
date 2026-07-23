@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use crate::channel::{Buffer, Envelope};
+use crate::channel::{Buffer, Envelope, MAX_DATA_LEN};
 use crate::hash::AddressHash;
 use crate::identity::{Identity, PrivateIdentity};
 use crate::link::{CTX_CHANNEL, Link};
@@ -56,20 +56,88 @@ impl ReliableChannel {
     /// A reliable channel whose peer is already known — an initiator, holding the
     /// destination's identity from its announce. `prover` is our identity.
     pub fn new(link: Link, prover: PrivateIdentity, peer: Identity) -> Self {
-        Self::build(link, prover, Some(peer))
+        Self::build(link, prover, Some(peer), None, None)
+    }
+
+    /// Initiator with a medium-specific first RTT estimate, in milliseconds.
+    pub fn new_with_initial_rtt(
+        link: Link,
+        prover: PrivateIdentity,
+        peer: Identity,
+        initial_rtt_ms: u64,
+    ) -> Self {
+        Self::build(link, prover, Some(peer), Some(initial_rtt_ms), None)
+    }
+
+    /// Initiator with medium-specific RTT and maximum in-flight frame count.
+    pub fn new_with_initial_rtt_and_max_window(
+        link: Link,
+        prover: PrivateIdentity,
+        peer: Identity,
+        initial_rtt_ms: u64,
+        max_window: u32,
+    ) -> Self {
+        Self::build(
+            link,
+            prover,
+            Some(peer),
+            Some(initial_rtt_ms),
+            Some(max_window),
+        )
     }
 
     /// A reliable channel whose peer is not yet known — a responder, which learns the
     /// initiator's identity from the IDENTIFY it sends (feed packets to
     /// [`on_identify`](Self::on_identify)). Until then its proofs are not validated.
     pub fn accepting(link: Link, prover: PrivateIdentity) -> Self {
-        Self::build(link, prover, None)
+        Self::build(link, prover, None, None, None)
     }
 
-    fn build(link: Link, prover: PrivateIdentity, peer: Option<Identity>) -> Self {
+    /// Responder with a medium-specific first RTT estimate, in milliseconds.
+    pub fn accepting_with_initial_rtt(
+        link: Link,
+        prover: PrivateIdentity,
+        initial_rtt_ms: u64,
+    ) -> Self {
+        Self::build(link, prover, None, Some(initial_rtt_ms), None)
+    }
+
+    /// Responder with medium-specific RTT and maximum in-flight frame count.
+    pub fn accepting_with_initial_rtt_and_max_window(
+        link: Link,
+        prover: PrivateIdentity,
+        initial_rtt_ms: u64,
+        max_window: u32,
+    ) -> Self {
+        Self::build(link, prover, None, Some(initial_rtt_ms), Some(max_window))
+    }
+
+    fn build(
+        link: Link,
+        prover: PrivateIdentity,
+        peer: Option<Identity>,
+        initial_rtt_ms: Option<u64>,
+        max_window: Option<u32>,
+    ) -> Self {
+        // Type-1 link header + token framing + CBC padding + Channel/Stream headers.
+        // This reproduces RNS's 423-byte default at MTU 500 and shrinks when a radio
+        // endpoint negotiates a smaller link MTU.
+        let token_room = (link.mtu() as usize).saturating_sub(crate::packet::HEADER_MIN_LEN);
+        let cipher_room = token_room.saturating_sub(crate::token::TOKEN_OVERHEAD);
+        let padded_plain = (cipher_room / 16) * 16;
+        let max_chunk = padded_plain
+            .saturating_sub(1)
+            .saturating_sub(6 + 2)
+            .clamp(1, MAX_DATA_LEN);
         Self {
             link,
-            buffer: Buffer::new(),
+            buffer: match (initial_rtt_ms, max_window) {
+                (Some(rtt), Some(window)) => Buffer::with_policy(rtt, window, max_chunk),
+                (Some(rtt), None) => {
+                    Buffer::with_policy(rtt, crate::channel::WINDOW_MAX, max_chunk)
+                }
+                (None, _) => Buffer::with_max_chunk(max_chunk),
+            },
             prover,
             peer,
             sent: HashMap::new(),
@@ -329,7 +397,10 @@ mod tests {
         // it learns the identity and the same proof is accepted.
         let server_id = PrivateIdentity::from_secret_bytes(&[0x22; 64]);
         let client_id = PrivateIdentity::from_secret_bytes(&[0x11; 64]);
-        let trailer = LinkTrailer { mode: LinkMode::Aes256Cbc, mtu: 500 };
+        let trailer = LinkTrailer {
+            mode: LinkMode::Aes256Cbc,
+            mtu: 500,
+        };
         let dest = DestinationName::new("retinue", ["test"]).destination_hash(server_id.public());
         let (pending, request) = PendingLink::open(dest, *server_id.public(), &[0x33; 64], trailer);
         let (responder_link, proof) = accept(&request, &server_id, &[0x99; 64], trailer).unwrap();
@@ -351,17 +422,28 @@ mod tests {
         };
         let sent = server.poll_transmit(0, &mut iv);
         assert!(!sent.is_empty());
-        let proof = client.on_data_packet(&sent[0]).expect("client proves the server's packet");
+        let proof = client
+            .on_data_packet(&sent[0])
+            .expect("client proves the server's packet");
 
         // Before identify the server cannot validate the client's proof, so it is not released.
         assert!(server.peer().is_none(), "no peer yet");
-        assert!(!server.on_proof(&proof, 1), "proof rejected before identify");
-        assert!(!server.send_idle(), "the server's packet is still outstanding");
+        assert!(
+            !server.on_proof(&proof, 1),
+            "proof rejected before identify"
+        );
+        assert!(
+            !server.send_idle(),
+            "the server's packet is still outstanding"
+        );
 
         // The client identifies; now the server learns it and accepts the same proof.
         let id_packet = client.link.identify_packet(&client_id, &[0x07; IV_LEN]);
         assert!(server.on_identify(&id_packet), "server learns the client");
-        assert_eq!(server.peer().map(|p| p.hash()), Some(client_id.public().hash()));
+        assert_eq!(
+            server.peer().map(|p| p.hash()),
+            Some(client_id.public().hash())
+        );
         assert!(server.on_proof(&proof, 2), "proof accepted after identify");
         assert!(server.send_idle(), "the server's packet is now released");
     }

@@ -6,7 +6,7 @@ the returned proof. Exercises the sender's HMU emission.
 Run from the oracle/ directory:  ./.venv/Scripts/python.exe -u interop_send_large.py
 """
 from __future__ import annotations
-import hashlib, re, shutil, subprocess, sys, tempfile, threading, time
+import atexit, hashlib, re, shutil, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 import RNS
 
@@ -41,6 +41,7 @@ def main() -> int:
         f"\n[logging]\n  loglevel=3\n\n[interfaces]\n  [[retinue]]\n    type=TCPClientInterface\n    enabled=yes\n"
         f"    target_host=127.0.0.1\n    target_port={port}\n", encoding="utf-8")
     RNS.Reticulum(configdir=str(cfg))
+    exit_code = 1
     try:
         identity = RNS.Identity.from_bytes(DEST_SEED)
         dest = RNS.Destination(identity, RNS.Destination.IN, RNS.Destination.SINGLE, "retinue", "recv")
@@ -78,11 +79,12 @@ def main() -> int:
         print("=" * 68)
         ok = data_ok and rns_complete and retinue_verified and used_hmu
         print(f"R4 WINDOWED RESOURCE SEND INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try: proc.wait(timeout=8)
         except subprocess.TimeoutExpired: proc.kill()
-        RNS.exit(); shutil.rmtree(cfg, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfg, ignore_errors=True); RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""R3 responder gate: RNS 1.3.8 initiates an encrypted link TO retinue.
+"""R3 responder gate: RNS 1.4.0 initiates an encrypted link TO retinue.
 
 The mirror of interop_link.py. retinue is the responder: it announces, RNS links to it,
 retinue proves and accepts, and they exchange encrypted bytes. Proves:
@@ -17,6 +17,7 @@ Run from the oracle/ directory:
 
 from __future__ import annotations
 
+import atexit
 import re
 import shutil
 import subprocess
@@ -75,6 +76,7 @@ def main() -> int:
         encoding="utf-8",
     )
     RNS.Reticulum(configdir=str(cfg))
+    exit_code = 1
     try:
         state = {}
 
@@ -146,14 +148,15 @@ def main() -> int:
         print("=" * 68)
         ok = proved and rns_est and retinue_decrypted and rns_decrypted_echo and keepalive
         print(f"R3 RESPONDER INTEROP: {'PASS' if ok else 'FAIL'}")
-        return 0 if ok else 1
+        exit_code = 0 if ok else 1
+        return exit_code
     finally:
         try:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        RNS.exit()
-        shutil.rmtree(cfg, ignore_errors=True)
+        atexit.register(shutil.rmtree, cfg, ignore_errors=True)
+        RNS.exit(exit_code)
 
 
 if __name__ == "__main__":

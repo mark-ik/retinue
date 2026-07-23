@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -38,6 +38,8 @@ use crate::link::{
 };
 use crate::packet::{DestinationType, Packet, PacketType};
 use crate::reliable::ReliableChannel;
+use crate::resource::RANDOM_HASH_LEN;
+use crate::resource_transfer::{ResourceReceiver, ResourceSender};
 use crate::token::IV_LEN;
 
 /// Largest plaintext chunk per link data packet. Kept under `ENCRYPTED_MDU` (383) so the
@@ -52,6 +54,17 @@ const DUPLEX_BUF: usize = 64 * 1024;
 /// active reliable link; a production build would pause it when the link is fully idle.
 const RELIABLE_TICK_MS: u64 = 50;
 
+/// Fast interfaces start here; radio callers can raise it before opening links.
+const DEFAULT_RELIABLE_INITIAL_RTT_MS: u64 = 750;
+
+/// Default dynamic Channel ceiling, matching RNS. Strict half-duplex callers
+/// can lower it without changing the wire format.
+const DEFAULT_RELIABLE_MAX_WINDOW: u32 = crate::channel::WINDOW_MAX;
+
+/// Default link MTU advertised by Reticulum. Radio callers can lower it to
+/// keep encrypted Channel frames and resource parts inside a proven RF size.
+const DEFAULT_LINK_MTU: u32 = crate::packet::MTU as u32;
+
 /// How many times an initiator sends its IDENTIFY over the opening retransmit ticks. RNS
 /// sends it once; on a lossy medium a single drop leaves the responder unable to validate our
 /// proofs of the data it sends us, stalling that direction with no way to recover. The wire
@@ -63,6 +76,35 @@ const IDENTIFY_MAX_SENDS: u32 = 4;
 /// be slow, so this is generous; it exists to bound a setup that will otherwise never
 /// complete (a peer that never proves) rather than to hang the caller forever.
 const LINK_SETUP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Default interval between identical link-request transmissions while setup is pending.
+const DEFAULT_LINK_SETUP_RETRY_MS: u64 = 2_000;
+
+/// Recent accepted requests whose proof can be replayed idempotently when the initiator
+/// retries after losing a proof.
+const LINK_REQUEST_CACHE: usize = 1_024;
+const LINK_REQUEST_CACHE_TTL: Duration = Duration::from_secs(30);
+
+/// Runtime policy for an endpoint-driven resource transfer.
+#[derive(Clone, Copy, Debug)]
+pub struct ResourceTransferConfig {
+    /// Maximum time allowed for the complete transfer.
+    pub timeout: Duration,
+    /// Interval between advertisement or request retransmissions.
+    pub retry_interval: Duration,
+    /// Maximum resource parts requested in one half-duplex turn.
+    pub request_window: usize,
+}
+
+impl Default for ResourceTransferConfig {
+    fn default() -> Self {
+        Self {
+            timeout: Duration::from_secs(30),
+            retry_interval: Duration::from_millis(500),
+            request_window: crate::resource::HASHMAP_MAX_PARTS,
+        }
+    }
+}
 
 /// Depth of the router's inbound queue. Bounded so a flooding peer cannot make the endpoint
 /// buffer packets without limit: a TCP reader awaits when it is full (back-pressuring the
@@ -136,6 +178,127 @@ impl AsyncWrite for LinkStream {
     }
 }
 
+/// A live link whose raw packets are driven by the resource transfer state machines.
+///
+/// One session carries one transfer at a time. A peer may either publish to this session or
+/// fetch from it; the other side performs the complementary operation.
+pub struct ResourceSession {
+    shared: Arc<Shared>,
+    link: Link,
+    iface: InterfaceId,
+    packets: mpsc::UnboundedReceiver<Packet>,
+    config: ResourceTransferConfig,
+}
+
+impl ResourceSession {
+    /// The id of the link carrying this resource session.
+    pub fn link_id(&self) -> AddressHash {
+        self.link.id()
+    }
+
+    /// Replace the retry and overall timeout policy for subsequent transfer work.
+    pub fn set_config(&mut self, config: ResourceTransferConfig) {
+        self.config = config;
+    }
+
+    /// Publish one payload and wait until the receiver proves complete receipt.
+    pub async fn publish(&mut self, data: &[u8]) -> io::Result<()> {
+        let mut random_hash = [0_u8; RANDOM_HASH_LEN];
+        fill_random(&mut random_hash);
+        let mut sender = ResourceSender::publish(self.link.clone(), data, random_hash, &next_iv());
+        self.shared
+            .send_on(self.iface, sender.advertisement(&next_iv()));
+
+        let shared = Arc::clone(&self.shared);
+        let iface = self.iface;
+        let packets = &mut self.packets;
+        let retry = self.config.retry_interval;
+        let transfer = async move {
+            let mut interval = tokio::time::interval(retry);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    maybe = packets.recv() => {
+                        let packet = maybe.ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, "resource link closed")
+                        })?;
+                        for outbound in sender.on_packet(&packet, next_iv) {
+                            shared.send_on(iface, outbound);
+                        }
+                        if sender.is_done() {
+                            return Ok(());
+                        } else if sender.is_canceled() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
+                                "resource publish canceled by receiver",
+                            ));
+                        }
+                    }
+                    _ = interval.tick() => {
+                        if !sender.has_started() {
+                            shared.send_on(iface, sender.advertisement(&next_iv()));
+                        }
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(self.config.timeout, transfer)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "resource publish timed out"))?
+    }
+
+    /// Fetch one payload published by the peer, returning after verification and proof.
+    pub async fn fetch(&mut self) -> io::Result<Vec<u8>> {
+        let mut receiver =
+            ResourceReceiver::with_request_window(self.link.clone(), self.config.request_window);
+        let shared = Arc::clone(&self.shared);
+        let iface = self.iface;
+        let packets = &mut self.packets;
+        let retry = self.config.retry_interval;
+        let transfer = async move {
+            let mut interval = tokio::time::interval(retry);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    maybe = packets.recv() => {
+                        let packet = maybe.ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::BrokenPipe, "resource link closed")
+                        })?;
+                        for outbound in receiver.on_packet(&packet, next_iv) {
+                            shared.send_on(iface, outbound);
+                        }
+                        if let Some(data) = receiver.data() {
+                            return Ok(data.to_vec());
+                        } else if receiver.is_canceled() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::ConnectionAborted,
+                                "resource fetch canceled by sender",
+                            ));
+                        }
+                    }
+                    _ = interval.tick() => {
+                        for outbound in receiver.retransmit(next_iv) {
+                            shared.send_on(iface, outbound);
+                        }
+                    }
+                }
+            }
+        };
+        tokio::time::timeout(self.config.timeout, transfer)
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "resource fetch timed out"))?
+    }
+}
+
+impl Drop for ResourceSession {
+    fn drop(&mut self) {
+        self.shared.links.lock().unwrap().remove(&self.link.id());
+        self.shared.send_on(self.iface, self.link.close_packet());
+    }
+}
+
 /// A validated announce, surfaced to a consumer that needs the app_data binding (e.g. to
 /// map an application-level peer id to a retinue destination).
 #[derive(Clone, Debug)]
@@ -153,6 +316,14 @@ pub struct Accepted {
     /// The stream carrying the link.
     pub stream: LinkStream,
     /// The destination hash the link request targeted (an ALPN maps to one).
+    pub destination: AddressHash,
+}
+
+/// An accepted resource link and the destination it arrived on.
+pub struct AcceptedResource {
+    /// The session that publishes or fetches one resource over the link.
+    pub session: ResourceSession,
+    /// The destination hash the link request targeted.
     pub destination: AddressHash,
 }
 
@@ -252,6 +423,10 @@ enum LinkKind {
     Reliable {
         packets: mpsc::UnboundedSender<Packet>,
     },
+    /// Raw resource control, part, and proof packets are handed to a resource session.
+    Resource {
+        packets: mpsc::UnboundedSender<Packet>,
+    },
 }
 
 type Links = Arc<Mutex<HashMap<AddressHash, LinkEntry>>>;
@@ -259,12 +434,18 @@ type Links = Arc<Mutex<HashMap<AddressHash, LinkEntry>>>;
 /// A destination this endpoint accepts links on.
 struct Registered {
     dest: AddressHash,
-    /// Whether links to it are reliable (Channel/Buffer + proofs) or best-effort.
-    reliable: bool,
+    kind: RegistrationKind,
     /// The name and app data this destination announced with, retained so a path request for
     /// it can be answered by re-announcing it as a path response.
     name: DestinationName,
     app_data: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
+enum RegistrationKind {
+    BestEffort,
+    Reliable,
+    Resource,
 }
 
 /// Shared router state.
@@ -282,6 +463,8 @@ struct Shared {
     /// Inbound accepted reliable streams, surfaced to `accept_reliable`. Registered eagerly
     /// (the peer identity is learned from the initiator's IDENTIFY, not needed up front).
     reliable_accepted_tx: mpsc::UnboundedSender<LinkStream>,
+    /// Inbound resource links, surfaced to `accept_resource`.
+    resource_accepted_tx: mpsc::UnboundedSender<AcceptedResource>,
     /// Validated announces, surfaced to `announcements`.
     announce_tx: mpsc::UnboundedSender<PeerAnnounce>,
     /// Pending outbound links awaiting a proof, keyed by destination: the waiter to wake
@@ -291,6 +474,17 @@ struct Shared {
     next_iface_id: AtomicU32,
     /// Whether this endpoint acts as a transport node (forwards announces and packets).
     routing: AtomicBool,
+    /// First reliable-channel RTT estimate. Proofs adapt it after traffic starts.
+    reliable_initial_rtt_ms: AtomicU64,
+    /// Maximum unproved reliable frames allowed in flight on subsequently opened links.
+    reliable_max_window: AtomicU32,
+    /// Link-request retry interval for subsequently opened links.
+    link_setup_retry_ms: AtomicU64,
+    /// MTU requested and offered by subsequently established links.
+    link_mtu: AtomicU32,
+    /// Proofs for recently accepted link requests, keyed by link id. Replaying the same
+    /// proof avoids creating a second stream when only the first proof was lost.
+    inbound_link_proofs: Mutex<HashMap<AddressHash, (Packet, Instant)>>,
     /// Learned routes: destination → the interface to reach it and its hop count. Populated
     /// from announces.
     path_table: Mutex<HashMap<AddressHash, PathEntry>>,
@@ -404,7 +598,14 @@ impl Shared {
                 e.learned = now;
             }
         } else {
-            t.insert(dest, PathEntry { iface, hops, learned: now });
+            t.insert(
+                dest,
+                PathEntry {
+                    iface,
+                    hops,
+                    learned: now,
+                },
+            );
         }
     }
 
@@ -466,6 +667,7 @@ pub struct Endpoint {
     shared: Arc<Shared>,
     accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<Accepted>>,
     reliable_accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<LinkStream>>,
+    resource_accepted_rx: AsyncMutex<mpsc::UnboundedReceiver<AcceptedResource>>,
     announce_rx: AsyncMutex<mpsc::UnboundedReceiver<PeerAnnounce>>,
 }
 
@@ -475,6 +677,8 @@ impl Endpoint {
         let (router_tx, mut router_rx) = mpsc::channel::<(InterfaceId, Packet)>(ROUTER_QUEUE);
         let (accepted_tx, accepted_rx) = mpsc::unbounded_channel::<Accepted>();
         let (reliable_accepted_tx, reliable_accepted_rx) = mpsc::unbounded_channel::<LinkStream>();
+        let (resource_accepted_tx, resource_accepted_rx) =
+            mpsc::unbounded_channel::<AcceptedResource>();
         let (announce_tx, announce_rx) = mpsc::unbounded_channel::<PeerAnnounce>();
 
         let shared = Arc::new(Shared {
@@ -486,11 +690,17 @@ impl Endpoint {
             router_tx,
             accepted_tx,
             reliable_accepted_tx,
+            resource_accepted_tx,
             announce_tx,
             pending: Mutex::new(HashMap::new()),
             pending_links: Mutex::new(HashMap::new()),
             next_iface_id: AtomicU32::new(0),
             routing: AtomicBool::new(false),
+            reliable_initial_rtt_ms: AtomicU64::new(DEFAULT_RELIABLE_INITIAL_RTT_MS),
+            reliable_max_window: AtomicU32::new(DEFAULT_RELIABLE_MAX_WINDOW),
+            link_setup_retry_ms: AtomicU64::new(DEFAULT_LINK_SETUP_RETRY_MS),
+            link_mtu: AtomicU32::new(DEFAULT_LINK_MTU),
+            inbound_link_proofs: Mutex::new(HashMap::new()),
             path_table: Mutex::new(HashMap::new()),
             seen_announces: Mutex::new((HashSet::new(), VecDeque::new())),
             announce_budget: Mutex::new(HashMap::new()),
@@ -510,6 +720,7 @@ impl Endpoint {
             shared,
             accepted_rx: AsyncMutex::new(accepted_rx),
             reliable_accepted_rx: AsyncMutex::new(reliable_accepted_rx),
+            resource_accepted_rx: AsyncMutex::new(resource_accepted_rx),
             announce_rx: AsyncMutex::new(announce_rx),
         }
     }
@@ -576,6 +787,44 @@ impl Endpoint {
         self.shared.routing.store(true, Ordering::Relaxed);
     }
 
+    /// Set the first reliable-channel RTT estimate for subsequently opened links.
+    /// Slow half-duplex radios should include their queue and proof turnaround time.
+    pub fn set_reliable_initial_rtt(&self, rtt: Duration) {
+        let millis = rtt.as_millis().clamp(1, u128::from(u64::MAX)) as u64;
+        self.shared
+            .reliable_initial_rtt_ms
+            .store(millis, Ordering::Relaxed);
+    }
+
+    /// Cap the reliable Channel send window for subsequently opened links.
+    ///
+    /// Set this to one on strict half-duplex media so each data frame is proved
+    /// before another transmission begins. The default is RNS's dynamic maximum.
+    pub fn set_reliable_max_window(&self, frames: u32) {
+        self.shared.reliable_max_window.store(
+            frames.clamp(1, crate::channel::WINDOW_MAX),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Set the retry interval for link requests sent by subsequently opened links.
+    pub fn set_link_setup_retry(&self, interval: Duration) {
+        let millis = interval.as_millis().clamp(1, u128::from(u64::MAX)) as u64;
+        self.shared
+            .link_setup_retry_ms
+            .store(millis, Ordering::Relaxed);
+    }
+
+    /// Set the MTU requested and offered by subsequently established links.
+    ///
+    /// The lower bound keeps link setup, identify, and resource control packets
+    /// representable. The default remains Reticulum's 500-byte MTU.
+    pub fn set_link_mtu(&self, mtu: u32) {
+        self.shared
+            .link_mtu
+            .store(mtu.clamp(255, crate::packet::MTU as u32), Ordering::Relaxed);
+    }
+
     /// The interface a learned destination is reachable over, and its hop count. An expired
     /// route is not returned (and is evicted).
     pub fn route_to(&self, dest: AddressHash) -> Option<(InterfaceId, u8)> {
@@ -598,7 +847,7 @@ impl Endpoint {
     /// Register a destination to accept best-effort links on, and announce it. Accept these
     /// with [`accept`](Self::accept).
     pub fn register(&self, name: DestinationName, app_data: &[u8]) {
-        self.register_with(name, app_data, false);
+        self.register_with(name, app_data, RegistrationKind::BestEffort);
     }
 
     /// Register a destination to accept **reliable** links on — the Channel/Buffer path with
@@ -606,14 +855,19 @@ impl Endpoint {
     /// [`accept_reliable`](Self::accept_reliable); the initiator's identity arrives over the
     /// link, so none need be supplied.
     pub fn register_reliable(&self, name: DestinationName, app_data: &[u8]) {
-        self.register_with(name, app_data, true);
+        self.register_with(name, app_data, RegistrationKind::Reliable);
     }
 
-    fn register_with(&self, name: DestinationName, app_data: &[u8], reliable: bool) {
+    /// Register a destination that accepts resource sessions, then announce it.
+    pub fn register_resource(&self, name: DestinationName, app_data: &[u8]) {
+        self.register_with(name, app_data, RegistrationKind::Resource);
+    }
+
+    fn register_with(&self, name: DestinationName, app_data: &[u8], kind: RegistrationKind) {
         let dest = name.destination_hash(self.shared.identity.public());
         self.shared.registered.lock().unwrap().push(Registered {
             dest,
-            reliable,
+            kind,
             name: name.clone(),
             app_data: app_data.to_vec(),
         });
@@ -666,7 +920,64 @@ impl Endpoint {
     /// validate our proofs in turn.
     pub async fn open_reliable(&self, dest: AddressHash, peer: Identity) -> io::Result<LinkStream> {
         let (link, iface) = self.establish(dest, peer).await?;
-        Ok(register_reliable_stream(&self.shared, link, iface, Some(peer)))
+        Ok(register_reliable_stream(
+            &self.shared,
+            link,
+            iface,
+            Some(peer),
+        ))
+    }
+
+    /// Open a link whose packets are driven by the resource transfer state machines.
+    pub async fn open_resource(
+        &self,
+        dest: AddressHash,
+        peer: Identity,
+    ) -> io::Result<ResourceSession> {
+        let (link, iface) = self.establish(dest, peer).await?;
+        Ok(register_resource_session(&self.shared, link, iface))
+    }
+
+    /// Open a resource link and publish one payload over it.
+    pub async fn publish_resource(
+        &self,
+        dest: AddressHash,
+        peer: Identity,
+        data: &[u8],
+    ) -> io::Result<()> {
+        self.publish_resource_with_config(dest, peer, data, ResourceTransferConfig::default())
+            .await
+    }
+
+    /// Open and publish with explicit retry and total-time policy.
+    pub async fn publish_resource_with_config(
+        &self,
+        dest: AddressHash,
+        peer: Identity,
+        data: &[u8],
+        config: ResourceTransferConfig,
+    ) -> io::Result<()> {
+        let mut session = self.open_resource(dest, peer).await?;
+        session.set_config(config);
+        session.publish(data).await
+    }
+
+    /// Open a resource link and fetch one payload published by the peer.
+    pub async fn fetch_resource(&self, dest: AddressHash, peer: Identity) -> io::Result<Vec<u8>> {
+        self.fetch_resource_with_config(dest, peer, ResourceTransferConfig::default())
+            .await
+    }
+
+    /// Open and fetch with explicit retry and total-time policy.
+    pub async fn fetch_resource_with_config(
+        &self,
+        dest: AddressHash,
+        peer: Identity,
+        config: ResourceTransferConfig,
+    ) -> io::Result<Vec<u8>> {
+        let mut session = self.open_resource(dest, peer).await?;
+        session.set_config(config);
+        session.fetch().await
     }
 
     /// Establish a link to `dest` (whose identity is `peer`), returning it with the interface
@@ -677,13 +988,14 @@ impl Endpoint {
         peer: Identity,
     ) -> io::Result<(Link, InterfaceId)> {
         let ephemeral = ephemeral_seed();
+        let link_mtu = self.shared.link_mtu.load(Ordering::Relaxed);
         let (pending, request) = link::PendingLink::open(
             dest,
             peer,
             &ephemeral,
             LinkTrailer {
                 mode: LinkMode::Aes256Cbc,
-                mtu: crate::packet::MTU as u32,
+                mtu: link_mtu,
             },
         );
 
@@ -707,24 +1019,37 @@ impl Endpoint {
         // Send the request toward the destination: on the interface the path table names
         // (addressed via its transport node if remote), or broadcast if we have no route yet
         // (a directly-connected peer).
-        match self.shared.path_iface(dest) {
-            Some(iface) => self.shared.send_on(iface, request),
-            None => self.shared.broadcast(request),
-        }
+        let send_request = || match self.shared.path_iface(dest) {
+            Some(iface) => self.shared.send_on(iface, request.clone()),
+            None => self.shared.broadcast(request.clone()),
+        };
+        send_request();
 
-        match tokio::time::timeout(LINK_SETUP_TIMEOUT, rx).await {
-            Ok(Ok(established)) => {
-                guard.armed = false; // the router already removed both entries on success
-                Ok(established)
+        let retry = Duration::from_millis(self.shared.link_setup_retry_ms.load(Ordering::Relaxed));
+        let mut retries = tokio::time::interval_at(tokio::time::Instant::now() + retry, retry);
+        retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let deadline = tokio::time::sleep(LINK_SETUP_TIMEOUT);
+        tokio::pin!(deadline);
+        tokio::pin!(rx);
+
+        loop {
+            tokio::select! {
+                result = &mut rx => match result {
+                    Ok(established) => {
+                        guard.armed = false; // router removed both entries on success
+                        return Ok(established);
+                    }
+                    Err(_) => return Err(io::Error::new(
+                        io::ErrorKind::ConnectionReset,
+                        "link setup dropped",
+                    )),
+                },
+                _ = retries.tick() => send_request(),
+                _ = &mut deadline => return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "link setup timed out",
+                )),
             }
-            Ok(Err(_)) => Err(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "link setup dropped",
-            )),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "link setup timed out",
-            )),
         }
     }
 
@@ -750,6 +1075,16 @@ impl Endpoint {
     /// need be supplied here; the driver validates the initiator's proofs once it arrives.
     pub async fn accept_reliable(&self) -> io::Result<LinkStream> {
         self.reliable_accepted_rx
+            .lock()
+            .await
+            .recv()
+            .await
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "endpoint closed"))
+    }
+
+    /// Wait for an inbound resource link, including the destination it targeted.
+    pub async fn accept_resource(&self) -> io::Result<AcceptedResource> {
+        self.resource_accepted_rx
             .lock()
             .await
             .recv()
@@ -912,38 +1247,81 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         }
         PacketType::LinkRequest => {
             let dest = pkt.destination;
-            let reliable = shared
+            let kind = shared
                 .registered
                 .lock()
                 .unwrap()
                 .iter()
                 .find(|r| r.dest == dest)
-                .map(|r| r.reliable);
-            if let Some(reliable) = reliable {
+                .map(|r| r.kind);
+            if let Some(kind) = kind {
+                let request_link_id = link::link_id(&pkt).ok();
+                if let Some(link_id) = request_link_id {
+                    let cached = {
+                        let mut cache = shared.inbound_link_proofs.lock().unwrap();
+                        cache.retain(|_, (_, at)| at.elapsed() < LINK_REQUEST_CACHE_TTL);
+                        cache.get(&link_id).map(|(proof, _)| proof.clone())
+                    };
+                    if let Some(proof) = cached {
+                        shared.send_on(iface, proof);
+                        return;
+                    }
+                }
                 let ephemeral = ephemeral_seed();
+                let configured_mtu = shared.link_mtu.load(Ordering::Relaxed);
+                let requested_mtu = pkt
+                    .payload
+                    .get(link::LINK_KEYS_LEN..link::LINK_KEYS_LEN + link::TRAILER_LEN)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .and_then(|trailer| LinkTrailer::decode(trailer).ok())
+                    .map(|trailer| trailer.mtu)
+                    .unwrap_or(configured_mtu);
                 if let Ok((link, proof)) = link::accept(
                     &pkt,
                     &shared.identity,
                     &ephemeral,
                     LinkTrailer {
                         mode: LinkMode::Aes256Cbc,
-                        mtu: crate::packet::MTU as u32,
+                        mtu: configured_mtu.min(requested_mtu),
                     },
                 ) {
+                    {
+                        let mut cache = shared.inbound_link_proofs.lock().unwrap();
+                        if cache.len() >= LINK_REQUEST_CACHE {
+                            cache.retain(|_, (_, at)| at.elapsed() < LINK_REQUEST_CACHE_TTL);
+                        }
+                        if cache.len() >= LINK_REQUEST_CACHE
+                            && let Some(oldest) = cache
+                                .iter()
+                                .min_by_key(|(_, (_, at))| *at)
+                                .map(|(id, _)| *id)
+                        {
+                            cache.remove(&oldest);
+                        }
+                        cache.insert(link.id(), (proof.clone(), Instant::now()));
+                    }
                     shared.send_on(iface, proof);
-                    if reliable {
-                        // Register eagerly with no peer yet: the driver learns the initiator's
-                        // identity from the IDENTIFY it sends. Registering now (rather than at
-                        // accept_reliable) means an early identify or data packet has a stream
-                        // to route to.
-                        let stream = register_reliable_stream(shared, link, iface, None);
-                        let _ = shared.reliable_accepted_tx.send(stream);
-                    } else {
-                        let stream = register_stream(shared, link, iface);
-                        let _ = shared.accepted_tx.send(Accepted {
-                            stream,
-                            destination: dest,
-                        });
+                    match kind {
+                        RegistrationKind::Reliable => {
+                            // Register eagerly with no peer yet: the driver learns the
+                            // initiator's identity from the IDENTIFY it sends.
+                            let stream = register_reliable_stream(shared, link, iface, None);
+                            let _ = shared.reliable_accepted_tx.send(stream);
+                        }
+                        RegistrationKind::Resource => {
+                            let session = register_resource_session(shared, link, iface);
+                            let _ = shared.resource_accepted_tx.send(AcceptedResource {
+                                session,
+                                destination: dest,
+                            });
+                        }
+                        RegistrationKind::BestEffort => {
+                            let stream = register_stream(shared, link, iface);
+                            let _ = shared.accepted_tx.send(Accepted {
+                                stream,
+                                destination: dest,
+                            });
+                        }
                     }
                 }
             }
@@ -975,7 +1353,9 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                     .unwrap()
                     .get(&pkt.destination)
                     .and_then(|e| match &e.kind {
-                        LinkKind::Reliable { packets } => Some(packets.clone()),
+                        LinkKind::Reliable { packets } | LinkKind::Resource { packets } => {
+                            Some(packets.clone())
+                        }
                         LinkKind::BestEffort { .. } => None,
                     });
                 if let Some(packets) = packets {
@@ -986,11 +1366,13 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
         PacketType::Data => {
             // Link data: route to the matching stream by its delivery discipline. Clone the
             // sender(s) under the lock, then act on the packet once the lock is released.
-            let (reliable, best) = {
+            let (raw, best) = {
                 let links = shared.links.lock().unwrap();
                 match links.get(&pkt.destination) {
                     Some(e) => match &e.kind {
-                        LinkKind::Reliable { packets } => (Some(packets.clone()), None),
+                        LinkKind::Reliable { packets } | LinkKind::Resource { packets } => {
+                            (Some(packets.clone()), None)
+                        }
                         LinkKind::BestEffort { inbound } => {
                             (None, Some((e.link.clone(), inbound.clone())))
                         }
@@ -998,8 +1380,8 @@ fn route(shared: &Arc<Shared>, iface: InterfaceId, pkt: Packet) {
                     None => (None, None),
                 }
             };
-            if let Some(packets) = reliable {
-                // The reliable driver owns decryption, ordering, and proving; hand it raw.
+            if let Some(packets) = raw {
+                // The reliable or resource driver owns this packet; hand it over raw.
                 let _ = packets.send(pkt);
             } else if let Some((link, inbound)) = best {
                 match link.receive(&pkt) {
@@ -1052,6 +1434,30 @@ fn forward_on(shared: &Arc<Shared>, out: InterfaceId, mut pkt: Packet) {
     pkt.header_type = crate::packet::HeaderType::Type1;
     pkt.transport = None;
     shared.send_on(out, pkt);
+}
+
+/// Register a link for endpoint-driven resource packets.
+fn register_resource_session(
+    shared: &Arc<Shared>,
+    link: Link,
+    iface: InterfaceId,
+) -> ResourceSession {
+    let (packet_tx, packets) = mpsc::unbounded_channel();
+    shared.links.lock().unwrap().insert(
+        link.id(),
+        LinkEntry {
+            link: link.clone(),
+            kind: LinkKind::Resource { packets: packet_tx },
+            iface,
+        },
+    );
+    ResourceSession {
+        shared: Arc::clone(shared),
+        link,
+        iface,
+        packets,
+        config: ResourceTransferConfig::default(),
+    }
 }
 
 /// Build a [`LinkStream`] for a live link on `iface`, wiring the inbound feed and the
@@ -1149,9 +1555,22 @@ fn register_reliable_stream(
         .is_some()
         .then(|| link.identify_packet(&shared.identity, &next_iv()));
     let close_link = link.clone();
+    let initial_rtt_ms = shared.reliable_initial_rtt_ms.load(Ordering::Relaxed);
+    let max_window = shared.reliable_max_window.load(Ordering::Relaxed);
     let mut rc = match peer {
-        Some(p) => ReliableChannel::new(link, shared.identity.clone(), p),
-        None => ReliableChannel::accepting(link, shared.identity.clone()),
+        Some(p) => ReliableChannel::new_with_initial_rtt_and_max_window(
+            link,
+            shared.identity.clone(),
+            p,
+            initial_rtt_ms,
+            max_window,
+        ),
+        None => ReliableChannel::accepting_with_initial_rtt_and_max_window(
+            link,
+            shared.identity.clone(),
+            initial_rtt_ms,
+            max_window,
+        ),
     };
     let drv = Arc::clone(shared);
     track(shared, async move {
@@ -1347,11 +1766,20 @@ mod tests {
         assert!(ep.shared.announce_within_budget(a), "first for a accepted");
         assert!(ep.shared.announce_within_budget(b), "first for b accepted");
         // An immediate re-announce for the same destination is dropped.
-        assert!(!ep.shared.announce_within_budget(a), "a re-announce rate-limited");
-        assert!(!ep.shared.announce_within_budget(b), "b re-announce rate-limited");
+        assert!(
+            !ep.shared.announce_within_budget(a),
+            "a re-announce rate-limited"
+        );
+        assert!(
+            !ep.shared.announce_within_budget(b),
+            "b re-announce rate-limited"
+        );
         // A different, unseen destination is still accepted.
         let c = AddressHash::from_bytes([0x03; 16]);
-        assert!(ep.shared.announce_within_budget(c), "a new destination is accepted");
+        assert!(
+            ep.shared.announce_within_budget(c),
+            "a new destination is accepted"
+        );
     }
 
     #[tokio::test]
@@ -1372,7 +1800,10 @@ mod tests {
 
         // A peer requests a path to our destination.
         let sink = iface.sink();
-        assert!(sink.deliver(crate::path::path_request(dest, &[0x77; crate::path::TAG_LEN])));
+        assert!(sink.deliver(crate::path::path_request(
+            dest,
+            &[0x77; crate::path::TAG_LEN]
+        )));
 
         // We answer with a path response: an announce for that destination, context 0x0b.
         let resp = tokio::time::timeout(Duration::from_secs(1), iface.next_outbound())
@@ -1395,7 +1826,10 @@ mod tests {
         let mut iface = ep.attach_interface();
         let sink = iface.sink();
         let unknown = AddressHash::from_bytes([0xCC; 16]);
-        assert!(sink.deliver(crate::path::path_request(unknown, &[0; crate::path::TAG_LEN])));
+        assert!(sink.deliver(crate::path::path_request(
+            unknown,
+            &[0; crate::path::TAG_LEN]
+        )));
 
         // We own nothing, hold no cache, so we stay silent.
         let got = tokio::time::timeout(Duration::from_millis(200), iface.next_outbound()).await;

@@ -1,21 +1,21 @@
 # retinue v0 — Endpoint-Scoped Reticulum
 
-**Status (2026-07-15):** **R0–R7 done and R5 (mere adoption) landed — retinue now
-backs mere's `Transport` trait, all verified against a live RNS 1.3.8.** retinue holds
+**Status (2026-07-22):** **R0–R7 done and R5 (mere adoption) landed — retinue now
+backs mere's `Transport` trait, live-verified against RNS 1.4.0.** retinue holds
 an identity; builds and validates announces (ratcheted and not); frames HDLC; exchanges
 announces over live TCP both ways; learns peers into an address book and emits path
 requests; is a full encrypted-link peer in both roles (data both ways, keepalive,
 teardown, request/response); does resources end to end both ways incl. 2.5MB
 multi-segment (RNS concludes COMPLETE); is a full RNS-compatible transport node
 (routing verified both directions); and runs an **endpoint that exposes links as
-`AsyncRead + AsyncWrite` streams**, proven bidirectional against RNS. 63 retinue tests
-+ fixture/framing suites green, plus **live mixed-runtime interop gates** (announce,
+`AsyncRead + AsyncWrite` streams**, proven bidirectional against RNS. 79 library tests,
+with integration, fixture, framing, and doctest suites green, plus **live mixed-runtime
+interop gates** (announce,
 link initiate/respond, request/response, R2 path, resource both ways, routing both
 ways, endpoint stream). **R5 mere wiring is done**: `ReticulumTransport` runs on
 `retinue::endpoint::Endpoint`; mere's reticulum-lane tests pass (bilateral round-trip
-included) and the Beechat pin is deleted. Remaining: R4 follow-ons (dynamic window
-sizing, retries/cancel) and the R8–R10 spec-parity phases (IFAC, full ratchets,
-remaining interface types).
+included) and the Beechat pin is deleted. Remaining: the R8–R10 spec-parity phases
+(IFAC, full ratchets, remaining interface types) and headed Tulle/RF proofs.
 Direction decided in the Mere workspace (mere design_docs,
 `2026-06-29_reticulum_transport_plan.md` Direction section and
 `2026-07-06_lxmf_key_addressed_mail_research.md`): Mere stewards its own
@@ -473,7 +473,7 @@ and refined by
 
 ## Decisions (2026-07-13)
 
-**Version pin: RNS 1.3.8, and the 1.x churn does not threaten us.** Upstream is
+**Initial version pin: RNS 1.3.8, and the 1.x churn does not threaten us.** Upstream is
 still shipping under `markqvist/Reticulum` (1.3.8 on 2026-07-10; 1.1.9 → 1.3.8
 in under three months), so "the founder stepped back" describes community
 engagement, not releases. The moving parts in that window are transport-node
@@ -485,6 +485,18 @@ community forks (RetiNet, Reticulum_CE) claim RNS 1.0 compatibility, which is
 the best available evidence that the 1.x endpoint format is frozen. Pin the
 oracle venv to `rns==1.3.8` and the manual to the 1.3.8 snapshot; re-pin on a
 schedule, not on every upstream release.
+
+**2026-07-22 rebaseline: RNS 1.4.0.** RNS 1.3.9 was a critical `rnsh` security
+release, and 1.4.0 followed on PyPI before this rebaseline finished. The committed
+1.3.8 fixtures remain historical byte evidence; `oracle/requirements.txt` now pins
+1.4.0 for live compatibility. All eleven mixed-runtime gates pass. The rerun exposed
+and fixed Retinue's oversized, stateful multi-segment HMU emission: HMUs are now
+bounded to 74 hashes and deterministically retransmittable. Resource initiator and
+receiver cancels now terminate endpoint sessions instead of waiting for timeout. The
+gates also return failing process status on a failed assertion. RNS 1.3.9 and 1.4.0
+have an observed `TCPClientInterface.ifac_size` initialization race when a peer sends
+immediately on accept; direct TCP probes wait 250 ms and document that oracle-only
+workaround.
 
 **Async posture: sans-io core, tokio shell.** It falls out of R0 naturally, as
 the plan hoped. R0 is entirely pure functions over bytes (identity derivation,
