@@ -14,7 +14,7 @@ use crate::airtime::AirtimeBudget;
 use crate::modem::{Modem, ModemError, ModemEvent};
 
 /// A frame received off the air, with its link-quality metrics.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Received {
     pub frame: Vec<u8>,
     pub rssi_dbm: i16,
@@ -182,7 +182,9 @@ mod tests {
         assert!(matches!(link.send(&payload, 0), SendOutcome::Sent { .. }));
         assert!(matches!(link.send(&payload, 0), SendOutcome::Sent { .. }));
         match link.send(&payload, 0) {
-            SendOutcome::DutyCycleBlocked { retry_at_ms: Some(t) } => {
+            SendOutcome::DutyCycleBlocked {
+                retry_at_ms: Some(t),
+            } => {
                 assert!(t > 0, "a future retry time");
                 // At the reported time, the send fits.
                 assert!(matches!(link.send(&payload, t), SendOutcome::Sent { .. }));
@@ -196,9 +198,15 @@ mod tests {
         let mut link = tight_link();
         let payload = vec![0u8; 30]; // ~72 ms, only one fits per 100 ms window
         assert!(matches!(link.send(&payload, 0), SendOutcome::Sent { .. }));
-        assert!(matches!(link.send(&payload, 10), SendOutcome::DutyCycleBlocked { .. }));
+        assert!(matches!(
+            link.send(&payload, 10),
+            SendOutcome::DutyCycleBlocked { .. }
+        ));
         // A full window later, the air is free again.
-        assert!(matches!(link.send(&payload, 1200), SendOutcome::Sent { .. }));
+        assert!(matches!(
+            link.send(&payload, 1200),
+            SendOutcome::Sent { .. }
+        ));
     }
 
     #[test]

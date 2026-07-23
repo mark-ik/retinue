@@ -95,7 +95,10 @@ fn replaying_device_responses_brings_the_radio_online() {
     assert!(rnode.is_detected(), "detect response recognised");
     assert!(rnode.is_online(), "radio-state echo 01 brings it online");
     assert_eq!(rnode.fw_version(), Some((1, 86)), "firmware 1.86 probed");
-    assert!(rnode.last_error().is_none(), "no error frames in the capture");
+    assert!(
+        rnode.last_error().is_none(),
+        "no error frames in the capture"
+    );
     let received: Vec<_> = std::iter::from_fn(|| rnode.poll())
         .filter(|e| matches!(e, ModemEvent::Received { .. }))
         .collect();
@@ -150,7 +153,10 @@ fn enqueue_frames_data_and_prices_airtime() {
     rnode.start();
     rnode.take_outbound();
     // Bring it online with the captured responses first: enqueue refuses while offline.
-    assert!(rnode.enqueue(b"too early").is_err(), "offline enqueue refused");
+    assert!(
+        rnode.enqueue(b"too early").is_err(),
+        "offline enqueue refused"
+    );
     rnode.on_serial(&direction_bytes(&cap, "rnode->host", 0));
     assert!(rnode.is_online());
 

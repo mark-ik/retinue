@@ -1,0 +1,6 @@
+[target.thumbv7em-none-eabihf]
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x"]
+
+[target.xtensa-esp32s3-none-elf]
+runner = "espflash flash --monitor"
+rustflags = ["-C", "link-arg=-nostartfiles", "-C", "link-arg=-Tlinkall.x"]

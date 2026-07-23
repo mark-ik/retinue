@@ -52,9 +52,9 @@ pub const DETECT_RESP: u8 = 0x46;
 /// RSSI on the wire is offset by this: `dBm = raw - 157`.
 pub const RSSI_OFFSET: i16 = 157;
 
-/// Largest frame the host protocol carries (RNS's packet MTU). The LoRa PHY caps a single
-/// transmission near 255 bytes; how the firmware treats larger frames is not yet pinned by
-/// capture (ours are ≤172 bytes), so treat >255 as unproven rather than safe.
+/// Largest frame the host protocol carries (RNS's packet MTU). Headed acceptance on two
+/// Heltec v4 RNodes running firmware 1.86 moved 500 bytes byte-exactly over RF and rejected
+/// 501 bytes at this host boundary.
 pub const MAX_FRAME: usize = 500;
 
 /// A sans-io RNode: implements [`Modem`] on top of the captured host protocol.

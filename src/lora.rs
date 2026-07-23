@@ -17,6 +17,7 @@
 //! derived, never stored: storing it invites a transmitter/receiver mismatch.
 
 use core::time::Duration;
+use tulle_phy_profile::PhyProfile;
 
 /// LoRa coding rate, `4/(4+n)`. The wire encoding is `1..=4`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,7 +109,35 @@ impl LoRaParams {
 
     /// Time-on-air in whole milliseconds (rounded), for feeding [`crate::airtime::AirtimeBudget`].
     pub fn time_on_air_ms(&self, payload_len: usize) -> u64 {
-        self.time_on_air(payload_len).as_secs_f64().mul_add(1000.0, 0.5) as u64
+        self.time_on_air(payload_len)
+            .as_secs_f64()
+            .mul_add(1000.0, 0.5) as u64
+    }
+}
+
+impl TryFrom<PhyProfile> for LoRaParams {
+    type Error = &'static str;
+
+    fn try_from(profile: PhyProfile) -> Result<Self, Self::Error> {
+        let coding_rate = match profile.coding_rate_denominator {
+            5 => CodingRate::Cr45,
+            6 => CodingRate::Cr46,
+            7 => CodingRate::Cr47,
+            8 => CodingRate::Cr48,
+            _ => return Err("unsupported LoRa coding rate"),
+        };
+        let tx_power_dbm = u8::try_from(profile.tx_power_dbm)
+            .map_err(|_| "negative transmit power is unsupported by the airtime settings")?;
+        Ok(Self {
+            spreading_factor: profile.spreading_factor,
+            bandwidth_hz: profile.bandwidth_hz,
+            coding_rate,
+            frequency_hz: profile.frequency_hz,
+            tx_power_dbm,
+            preamble_syms: profile.preamble_symbols,
+            explicit_header: profile.explicit_header,
+            crc: profile.crc,
+        })
     }
 }
 
