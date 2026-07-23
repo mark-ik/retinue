@@ -9,12 +9,13 @@ use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::{bind_interrupts, peripherals, usb};
-use embassy_time::{Delay, Duration, with_timeout};
+use embassy_time::{Delay, Duration, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config, UsbDevice};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
-use lora_phy::iv::GenericSx126xInterfaceVariant;
+use lora_phy::mod_params::RadioError;
+use lora_phy::mod_traits::InterfaceVariant;
 use lora_phy::sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage};
 use lora_phy::{LoRa, RxMode};
 use panic_halt as _;
@@ -36,6 +37,52 @@ const FREQUENCY_HZ: u32 = 906_875_000;
 const TX_POWER_DBM: i32 = 17;
 const MAX_RADIO_FRAME: usize = 255;
 const USB_PACKET: usize = 64;
+
+struct T114Interface<'d> {
+    reset: Output<'d>,
+    dio1: Input<'d>,
+    busy: Input<'d>,
+}
+
+impl InterfaceVariant for T114Interface<'_> {
+    async fn reset(&mut self, delay: &mut impl lora_phy::DelayNs) -> Result<(), RadioError> {
+        delay.delay_ms(10).await;
+        self.reset.set_low();
+        delay.delay_ms(20).await;
+        self.reset.set_high();
+        delay.delay_ms(10).await;
+        Ok(())
+    }
+
+    async fn wait_on_busy(&mut self) -> Result<(), RadioError> {
+        while self.busy.is_high() {
+            Timer::after_micros(50).await;
+        }
+        Ok(())
+    }
+
+    async fn await_irq(&mut self) -> Result<(), RadioError> {
+        // SX1262 holds DIO1 high until its IRQ flags are cleared. Polling the
+        // level avoids depending on GPIO sense wakeups across the T114's
+        // SoftDevice bootloader boundary and cannot miss the latched event.
+        while self.dio1.is_low() {
+            Timer::after_millis(1).await;
+        }
+        Ok(())
+    }
+
+    async fn enable_rf_switch_rx(&mut self) -> Result<(), RadioError> {
+        Ok(())
+    }
+
+    async fn enable_rf_switch_tx(&mut self) -> Result<(), RadioError> {
+        Ok(())
+    }
+
+    async fn disable_rf_switch(&mut self) -> Result<(), RadioError> {
+        Ok(())
+    }
+}
 
 fn spreading_factor(value: u8) -> Option<SpreadingFactor> {
     Some(match value {
@@ -157,10 +204,7 @@ async fn main(spawner: Spawner) {
     let reset = Output::new(p.P0_25, Level::High, OutputDrive::Standard);
     let dio1 = Input::new(p.P0_20, Pull::None);
     let busy = Input::new(p.P0_17, Pull::None);
-    let interface = match GenericSx126xInterfaceVariant::new(reset, dio1, busy, None, None) {
-        Ok(interface) => interface,
-        Err(_) => panic!(),
-    };
+    let interface = T114Interface { reset, dio1, busy };
     let radio = Sx126x::new(
         spi,
         interface,
@@ -227,7 +271,8 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let online = b"tulle/t114 phy online; sx1262 online; sync=2b reg=24b4; longfast=906875000\r\n";
+    let online =
+        b"tulle/t114 phy online; sx1262 online; irq=poll; sync=2b reg=24b4; longfast=906875000\r\n";
     let mut usb_command = [0_u8; 3 + MAX_RADIO_FRAME];
     let mut usb_command_len;
     let mut tx_power_dbm = TX_POWER_DBM;
@@ -284,6 +329,14 @@ async fn main(spawner: Spawner) {
                 Either::First(Err(_)) => break,
                 Either::First(Ok(length)) => {
                     let packet = &usb_packet[..length];
+                    if packet == b"bootloader\n" || packet == b"bootloader\r\n" {
+                        let _ = write_all(&mut class, b"entering serial bootloader\r\n").await;
+                        Timer::after_millis(20).await;
+                        embassy_nrf::pac::POWER
+                            .gpregret()
+                            .write(|value| value.set_gpregret(0x4e));
+                        cortex_m::peripheral::SCB::sys_reset();
+                    }
                     if packet == b"status\n" || packet == b"status\r\n" {
                         if !write_all(&mut class, online).await {
                             break;
@@ -411,7 +464,7 @@ async fn main(spawner: Spawner) {
                     }
 
                     let sent_len = frame_len as u16;
-                    let result = if lora
+                    let prepared = lora
                         .prepare_for_tx(
                             &modulation,
                             &mut tx_params,
@@ -419,12 +472,15 @@ async fn main(spawner: Spawner) {
                             &usb_command[3..3 + frame_len],
                         )
                         .await
-                        .is_ok()
-                        && lora.tx().await.is_ok()
-                    {
-                        0
-                    } else {
+                        .is_ok();
+                    let result = if !prepared {
                         1
+                    } else {
+                        match with_timeout(Duration::from_secs(3), lora.tx()).await {
+                            Ok(Ok(())) => 0,
+                            Ok(Err(_)) => 1,
+                            Err(_) => 5,
+                        }
                     };
                     usb_command_len = 0;
                     prepare_rx = true;
