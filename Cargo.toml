@@ -2,17 +2,28 @@
 name = "tucket"
 version = "0.0.1"
 edition = "2024"
-description = "MeshCore interop for the retinue radio family: node management and text interop over LoRa mesh. Name reservation; development upcoming."
+description = "MeshCore interop for the retinue radio family: node management, routing, and text interop over LoRa mesh."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mark-ik/tucket"
 readme = "README.md"
 keywords = ["lora", "mesh", "meshcore", "radio", "reticulum"]
 categories = ["network-programming", "embedded"]
 
+[features]
+default = []
+hardware = ["dep:serial2-tokio", "dep:tokio", "dep:tulle"]
+
 [dependencies]
 aes = "0.8"
 curve25519-dalek = "4"
 ed25519-dalek = "2"
 hmac = "0.12"
+serial2-tokio = { version = "0.1.24", optional = true }
 sha2 = "0.10"
 subtle = "2"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "time"], optional = true }
+tulle = { version = "0.0.1", path = "../tulle", features = ["serial-async"], optional = true }
+
+[[example]]
+name = "meshcore_headed"
+required-features = ["hardware"]

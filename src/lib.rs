@@ -4,7 +4,6 @@
 //! of [retinue](https://github.com/mark-ik/retinue) on the shared tulle radio
 //! layer.
 //!
-//! This release reserves the name; the crate is under active design.
 //! A tucket is a trumpet flourish announcing a single arrival.
 
 pub mod advert;
@@ -14,3 +13,4 @@ pub mod mesh;
 pub mod message;
 pub mod node;
 pub mod packet;
+pub mod path;

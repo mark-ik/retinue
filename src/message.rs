@@ -230,7 +230,11 @@ mod tests {
         let msg = TextMessage::plain(99, "ping");
         let sender_pub = alice.identity().pub_key;
 
-        let payload = msg.encode(&secret, bob.identity().hash()[0], alice.identity().hash()[0]);
+        let payload = msg.encode(
+            &secret,
+            bob.identity().hash()[0],
+            alice.identity().hash()[0],
+        );
         let (_, _, recv) = TextMessage::decode(&payload, &secret).unwrap();
 
         let sender_ack = msg.ack_crc(&sender_pub);

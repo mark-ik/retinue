@@ -17,6 +17,120 @@ use crate::packet::{PUB_KEY_SIZE, SIGNATURE_SIZE};
 /// Maximum app-data bytes carried by an advert.
 pub const MAX_ADVERT_DATA: usize = 32;
 
+pub const ADVERT_TYPE_NONE: u8 = 0;
+pub const ADVERT_TYPE_CHAT: u8 = 1;
+pub const ADVERT_TYPE_REPEATER: u8 = 2;
+pub const ADVERT_TYPE_ROOM: u8 = 3;
+pub const ADVERT_TYPE_SENSOR: u8 = 4;
+
+const TYPE_MASK: u8 = 0x0f;
+const LAT_LON_MASK: u8 = 0x10;
+const FEATURE_1_MASK: u8 = 0x20;
+const FEATURE_2_MASK: u8 = 0x40;
+const NAME_MASK: u8 = 0x80;
+
+/// Structured application data carried by current MeshCore adverts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdvertData {
+    pub node_type: u8,
+    pub location_e6: Option<(i32, i32)>,
+    pub feature_1: Option<u16>,
+    pub feature_2: Option<u16>,
+    pub name: Option<String>,
+}
+
+impl AdvertData {
+    pub fn chat(name: impl Into<String>) -> Self {
+        Self {
+            node_type: ADVERT_TYPE_CHAT,
+            location_e6: None,
+            feature_1: None,
+            feature_2: None,
+            name: Some(name.into()),
+        }
+    }
+
+    pub fn encode(&self) -> Option<Vec<u8>> {
+        if self.node_type > TYPE_MASK {
+            return None;
+        }
+        let mut flags = self.node_type;
+        if self.location_e6.is_some() {
+            flags |= LAT_LON_MASK;
+        }
+        if self.feature_1.is_some() {
+            flags |= FEATURE_1_MASK;
+        }
+        if self.feature_2.is_some() {
+            flags |= FEATURE_2_MASK;
+        }
+        if self.name.as_ref().is_some_and(|name| !name.is_empty()) {
+            flags |= NAME_MASK;
+        }
+
+        let mut out = Vec::with_capacity(MAX_ADVERT_DATA);
+        out.push(flags);
+        if let Some((latitude, longitude)) = self.location_e6 {
+            out.extend_from_slice(&latitude.to_le_bytes());
+            out.extend_from_slice(&longitude.to_le_bytes());
+        }
+        if let Some(feature) = self.feature_1 {
+            out.extend_from_slice(&feature.to_le_bytes());
+        }
+        if let Some(feature) = self.feature_2 {
+            out.extend_from_slice(&feature.to_le_bytes());
+        }
+        if flags & NAME_MASK != 0 {
+            out.extend_from_slice(self.name.as_ref()?.as_bytes());
+        }
+        (out.len() <= MAX_ADVERT_DATA).then_some(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.is_empty() || bytes.len() > MAX_ADVERT_DATA {
+            return None;
+        }
+        let flags = bytes[0];
+        let mut offset = 1;
+        let location_e6 = if flags & LAT_LON_MASK != 0 {
+            let latitude = i32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+            offset += 4;
+            let longitude = i32::from_le_bytes(bytes.get(offset..offset + 4)?.try_into().ok()?);
+            offset += 4;
+            Some((latitude, longitude))
+        } else {
+            None
+        };
+        let feature_1 = if flags & FEATURE_1_MASK != 0 {
+            let value = u16::from_le_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?);
+            offset += 2;
+            Some(value)
+        } else {
+            None
+        };
+        let feature_2 = if flags & FEATURE_2_MASK != 0 {
+            let value = u16::from_le_bytes(bytes.get(offset..offset + 2)?.try_into().ok()?);
+            offset += 2;
+            Some(value)
+        } else {
+            None
+        };
+        let name = if flags & NAME_MASK != 0 {
+            let name = std::str::from_utf8(bytes.get(offset..)?).ok()?;
+            (!name.is_empty()).then(|| name.to_owned())
+        } else {
+            (offset == bytes.len()).then_some(None)?
+        };
+        Some(Self {
+            node_type: flags & TYPE_MASK,
+            location_e6,
+            feature_1,
+            feature_2,
+            name,
+        })
+    }
+}
+
 /// A decoded, signature-verified advert.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advert {
@@ -135,5 +249,25 @@ mod tests {
         let wire = Advert::encode(&li(), 9, b"").unwrap();
         assert_eq!(wire.len(), PUB_KEY_SIZE + 4 + SIGNATURE_SIZE);
         assert!(Advert::decode(&wire).is_some());
+    }
+
+    #[test]
+    fn current_chat_advert_data_round_trips() {
+        let data = AdvertData::chat("Tucket");
+        let encoded = data.encode().unwrap();
+        assert_eq!(encoded, b"\x81Tucket");
+        assert_eq!(AdvertData::decode(&encoded), Some(data));
+    }
+
+    #[test]
+    fn advert_data_round_trips_optional_fields() {
+        let data = AdvertData {
+            node_type: ADVERT_TYPE_SENSOR,
+            location_e6: Some((40_712_800, -74_006_000)),
+            feature_1: Some(7),
+            feature_2: Some(9),
+            name: Some("weather".into()),
+        };
+        assert_eq!(AdvertData::decode(&data.encode().unwrap()), Some(data));
     }
 }

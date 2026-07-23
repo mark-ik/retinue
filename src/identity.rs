@@ -89,7 +89,9 @@ impl LocalIdentity {
     /// `ed25519_key_exchange`. Returns `None` if the peer's key is not a valid curve point.
     /// The 32-byte result is the key material for the per-pair cipher (see [`crate::cipher`]).
     pub fn shared_secret(&self, peer: &Identity) -> Option<[u8; 32]> {
-        let montgomery = CompressedEdwardsY(peer.pub_key).decompress()?.to_montgomery();
+        let montgomery = CompressedEdwardsY(peer.pub_key)
+            .decompress()?
+            .to_montgomery();
         Some(montgomery.mul_clamped(self.x25519_scalar).to_bytes())
     }
 }

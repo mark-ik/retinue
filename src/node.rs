@@ -11,18 +11,134 @@
 //! surface its ack; note acks), then decide retransmission ([`crate::mesh::route_recv`]).
 //!
 //! Text messaging works only after the two ends have heard each other's adverts, since the
-//! per-pair cipher key is ECDH over the peer's public key. Messages flood by default (no known
-//! route required); a direct-routing optimization is a follow-on. This is V1 (1-byte hashes).
+//! per-pair cipher key is ECDH over the peer's public key. A first message floods when no route
+//! is known; its authenticated PATH response establishes reciprocal direct routes for later
+//! messages. This is V1 (1-byte path hashes).
 //!
 //! Ported from upstream MeshCore (MIT, <https://github.com/ripplebiz/MeshCore>).
 
 use std::collections::HashMap;
 
-use crate::advert::Advert;
+use crate::advert::{Advert, AdvertData};
 use crate::identity::{Identity, LocalIdentity};
 use crate::mesh::{Forward, SeenTable, route_recv};
 use crate::message::{TextMessage, decode_ack, encode_ack};
-use crate::packet::{Packet, ROUTE_FLOOD, payload_type};
+use crate::packet::{Packet, ROUTE_DIRECT, ROUTE_FLOOD, payload_type};
+use crate::path::PathMessage;
+
+/// A validated source route to one contact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectRoute {
+    path_len: u8,
+    path: Vec<u8>,
+}
+
+/// Retry behavior for one private text send.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TextRetryPolicy {
+    /// Total transmissions including the initial attempt, from 1 through 4.
+    pub attempts: u8,
+    /// Clear a learned path and flood the last attempt.
+    pub flood_last: bool,
+}
+
+impl TextRetryPolicy {
+    pub fn new(attempts: u8, flood_last: bool) -> Option<Self> {
+        (1..=4).contains(&attempts).then_some(Self {
+            attempts,
+            flood_last,
+        })
+    }
+}
+
+impl Default for TextRetryPolicy {
+    fn default() -> Self {
+        Self {
+            attempts: 4,
+            flood_last: true,
+        }
+    }
+}
+
+/// Caller-driven state for one text awaiting an acknowledgement.
+///
+/// Tucket owns attempt numbering, route fallback, and matching delayed ACKs.
+/// The caller owns the clock and decides when to ask for the next attempt.
+#[derive(Clone, Debug)]
+pub struct PendingText {
+    to: u8,
+    timestamp: u32,
+    text: String,
+    policy: TextRetryPolicy,
+    next_attempt: u8,
+    expected_acks: Vec<[u8; 4]>,
+    complete: bool,
+}
+
+impl PendingText {
+    pub fn attempts_sent(&self) -> u8 {
+        self.next_attempt
+    }
+
+    pub fn attempts_remaining(&self) -> u8 {
+        self.policy.attempts.saturating_sub(self.next_attempt)
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+
+    /// Accept an ACK from any attempt already emitted. Delayed delivery of an
+    /// earlier ACK still completes the send.
+    pub fn acknowledge(&mut self, ack: [u8; 4]) -> bool {
+        if self.expected_acks.contains(&ack) {
+            self.complete = true;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// One concrete transmission produced from a [`PendingText`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextAttempt {
+    pub frame: Vec<u8>,
+    pub ack: [u8; 4],
+    pub attempt: u8,
+    pub flooded: bool,
+}
+
+impl DirectRoute {
+    /// Construct a validated source route.
+    ///
+    /// `path_len` packs the hash width and hop count; `path` must contain exactly
+    /// that many bytes. A zero-hop route is valid and addresses a radio neighbour
+    /// directly.
+    pub fn new(path_len: u8, path: &[u8]) -> Option<Self> {
+        if !Packet::is_valid_path_len(path_len) {
+            return None;
+        }
+        let byte_len = ((path_len >> 6) as usize + 1) * (path_len & 63) as usize;
+        (path.len() == byte_len).then(|| Self {
+            path_len,
+            path: path.to_vec(),
+        })
+    }
+
+    pub fn path_len(&self) -> u8 {
+        self.path_len
+    }
+
+    pub fn path(&self) -> &[u8] {
+        &self.path
+    }
+}
+
+struct Contact {
+    identity: Identity,
+    route: Option<DirectRoute>,
+}
 
 /// Something the node surfaces to the application from a received frame.
 #[derive(Debug, Clone)]
@@ -52,7 +168,7 @@ pub struct Node {
     allow_forward: bool,
     /// Learned contacts, keyed by 1-byte node hash. A collision (two peers sharing a hash byte)
     /// keeps the most recently advertised, matching the wire's 1-byte addressing.
-    contacts: HashMap<u8, Identity>,
+    contacts: HashMap<u8, Contact>,
 }
 
 impl Node {
@@ -81,7 +197,88 @@ impl Node {
 
     /// A learned contact by node hash.
     pub fn contact(&self, hash: u8) -> Option<&Identity> {
-        self.contacts.get(&hash)
+        self.contacts.get(&hash).map(|contact| &contact.identity)
+    }
+
+    /// The authenticated direct route currently learned for a contact.
+    pub fn route_to(&self, hash: u8) -> Option<&DirectRoute> {
+        self.contacts.get(&hash)?.route.as_ref()
+    }
+
+    /// Set an operator-selected route for a known contact.
+    ///
+    /// This is useful when topology policy or an independently measured path
+    /// should take precedence over automatic flood discovery.
+    pub fn set_route(&mut self, hash: u8, route: DirectRoute) -> bool {
+        let Some(contact) = self.contacts.get_mut(&hash) else {
+            return false;
+        };
+        contact.route = Some(route);
+        true
+    }
+
+    /// Forget a route after a failed direct delivery so the next send floods and discovers a
+    /// fresh one.
+    pub fn clear_route(&mut self, hash: u8) {
+        if let Some(contact) = self.contacts.get_mut(&hash) {
+            contact.route = None;
+        }
+    }
+
+    /// Begin a caller-timed private text send. Returns `None` until the peer's
+    /// advert has supplied its public key.
+    pub fn begin_text(
+        &self,
+        to: u8,
+        timestamp: u32,
+        text: impl Into<String>,
+        policy: TextRetryPolicy,
+    ) -> Option<PendingText> {
+        self.contacts.get(&to)?;
+        Some(PendingText {
+            to,
+            timestamp,
+            text: text.into(),
+            policy,
+            next_attempt: 0,
+            expected_acks: Vec::with_capacity(policy.attempts as usize),
+            complete: false,
+        })
+    }
+
+    /// Produce the next numbered attempt. Returns `None` after completion or
+    /// when the configured attempt count is exhausted.
+    pub fn next_text_attempt(&mut self, pending: &mut PendingText) -> Option<TextAttempt> {
+        if pending.complete || pending.next_attempt >= pending.policy.attempts {
+            return None;
+        }
+        let peer = self.contacts.get(&pending.to)?.identity.clone();
+        let secret = self.identity.shared_secret(&peer)?;
+        let attempt = pending.next_attempt;
+        let flood_last = pending.policy.flood_last
+            && attempt + 1 == pending.policy.attempts
+            && self.route_to(pending.to).is_some();
+        if flood_last {
+            self.clear_route(pending.to);
+        }
+
+        let mut message = TextMessage::plain(pending.timestamp, pending.text.clone());
+        message.attempt = attempt;
+        let ack = message.ack_crc(&self.me.pub_key);
+        let payload = message.encode(&secret, pending.to, self.my_hash());
+        let mut packet = Packet::new(ROUTE_FLOOD, payload_type::TXT_MSG);
+        packet.payload = payload;
+        let frame = self.route_outgoing(pending.to, packet);
+        let flooded = Packet::decode(&frame).is_some_and(|packet| packet.is_flood());
+
+        pending.next_attempt += 1;
+        pending.expected_acks.push(ack);
+        Some(TextAttempt {
+            frame,
+            ack,
+            attempt,
+            flooded,
+        })
     }
 
     /// Handle one received raw frame. Returns `(events for the app, frames to retransmit)`.
@@ -92,14 +289,23 @@ impl Node {
         let Some(packet) = Packet::decode(frame) else {
             return (events, out);
         };
-        // Flood dedup: a packet we have already handled is neither re-surfaced nor re-forwarded.
+        // A direct packet is processed only by its current next hop. Other radios hear the
+        // same transmission but must not mark it seen before it reaches their turn in the
+        // source route.
+        let is_our_direct_hop =
+            packet.path_hop_count() == 0 || packet.path.first().copied() == Some(self.my_hash());
+        if !packet.is_flood() && !is_our_direct_hop {
+            return (events, out);
+        }
         if self.seen.has_seen(&packet) {
             return (events, out);
         }
 
-        let consumed = self.dispatch(&packet, &mut events);
+        let consumed = self.dispatch(&packet, &mut events, &mut out);
 
-        if let Forward::Retransmit(fwd) = route_recv(&packet, self.my_hash(), self.allow_forward, consumed) {
+        if let Forward::Retransmit(fwd) =
+            route_recv(&packet, self.my_hash(), self.allow_forward, consumed)
+        {
             out.push(fwd.encode());
         }
         (events, out)
@@ -107,12 +313,23 @@ impl Node {
 
     /// Process a packet by payload type, pushing any events. Returns whether it was consumed by
     /// this node (addressed to us and handled), which suppresses re-forwarding.
-    fn dispatch(&mut self, packet: &Packet, events: &mut Vec<Event>) -> bool {
+    fn dispatch(
+        &mut self,
+        packet: &Packet,
+        events: &mut Vec<Event>,
+        out: &mut Vec<Vec<u8>>,
+    ) -> bool {
         match packet.payload_type() {
             payload_type::ADVERT => {
                 if let Some(adv) = Advert::decode(&packet.payload) {
+                    let hash = adv.identity.hash()[0];
                     self.contacts
-                        .insert(adv.identity.hash()[0], adv.identity.clone());
+                        .entry(hash)
+                        .and_modify(|contact| contact.identity = adv.identity.clone())
+                        .or_insert(Contact {
+                            identity: adv.identity.clone(),
+                            route: None,
+                        });
                     events.push(Event::Advert {
                         identity: adv.identity,
                         timestamp: adv.timestamp,
@@ -129,7 +346,7 @@ impl Node {
                 let Some(&src_hash) = packet.payload.get(1) else {
                     return false;
                 };
-                let Some(sender) = self.contacts.get(&src_hash).cloned() else {
+                let Some(sender) = self.contacts.get(&src_hash).map(|c| c.identity.clone()) else {
                     // We do not know the sender yet, so we cannot derive the key. Let it forward
                     // in case another node can (and we may learn the sender's advert later).
                     return false;
@@ -145,6 +362,18 @@ impl Node {
                             message,
                             ack,
                         });
+                        if packet.is_flood()
+                            && let Some(frame) = self.path_frame(
+                                src_hash,
+                                packet.path_len,
+                                &packet.path,
+                                payload_type::ACK,
+                                &ack,
+                                None,
+                            )
+                        {
+                            out.push(frame);
+                        }
                         true // ours, handled
                     }
                     None => false,
@@ -156,8 +385,100 @@ impl Node {
                 }
                 false // acks flood to whoever awaits them
             }
+            payload_type::PATH => self.dispatch_path(packet, events, out),
             _ => false,
         }
+    }
+
+    fn dispatch_path(
+        &mut self,
+        packet: &Packet,
+        events: &mut Vec<Event>,
+        out: &mut Vec<Vec<u8>>,
+    ) -> bool {
+        if packet.payload.first() != Some(&self.my_hash()) {
+            return false;
+        }
+        let Some(&src_hash) = packet.payload.get(1) else {
+            return false;
+        };
+        let Some(sender) = self.contacts.get(&src_hash).map(|c| c.identity.clone()) else {
+            return false;
+        };
+        let Some(secret) = self.identity.shared_secret(&sender) else {
+            return false;
+        };
+        let Some((dest, src, path)) = PathMessage::decode(&packet.payload, &secret) else {
+            return false;
+        };
+        if dest != self.my_hash() || src != src_hash {
+            return false;
+        }
+
+        let route = DirectRoute {
+            path_len: path.path_len,
+            path: path.path.clone(),
+        };
+        if let Some(contact) = self.contacts.get_mut(&src_hash) {
+            contact.route = Some(route.clone());
+        }
+        if path.extra_type == payload_type::ACK
+            && let Some(ack) = decode_ack(&path.extra)
+        {
+            events.push(Event::Ack(ack));
+        }
+
+        if packet.is_flood()
+            && let Some(frame) = self.path_frame(
+                src_hash,
+                packet.path_len,
+                &packet.path,
+                0,
+                &[],
+                Some(&route),
+            )
+        {
+            out.push(frame);
+        }
+        true
+    }
+
+    fn path_frame(
+        &mut self,
+        to: u8,
+        path_len: u8,
+        path: &[u8],
+        extra_type: u8,
+        extra: &[u8],
+        direct: Option<&DirectRoute>,
+    ) -> Option<Vec<u8>> {
+        let peer = self.contacts.get(&to)?.identity.clone();
+        let secret = self.identity.shared_secret(&peer)?;
+        let message = PathMessage::new(path_len, path, extra_type, extra)?;
+        let payload = message.encode(&secret, to, self.my_hash())?;
+        let mut packet = Packet::new(
+            if direct.is_some() {
+                ROUTE_DIRECT
+            } else {
+                ROUTE_FLOOD
+            },
+            payload_type::PATH,
+        );
+        packet.payload = payload;
+        if let Some(route) = direct {
+            packet.path_len = route.path_len;
+            packet.path = route.path.clone();
+        }
+        Some(self.seal_outgoing(&packet))
+    }
+
+    fn route_outgoing(&mut self, to: u8, mut packet: Packet) -> Vec<u8> {
+        if let Some(route) = self.contacts.get(&to).and_then(|c| c.route.clone()) {
+            packet.header = (packet.header & !0x03) | ROUTE_DIRECT;
+            packet.path_len = route.path_len;
+            packet.path = route.path;
+        }
+        self.seal_outgoing(&packet)
     }
 
     /// Record a packet we are about to transmit as seen, so its echo off the air is suppressed.
@@ -175,17 +496,17 @@ impl Node {
         self.seal_outgoing(&packet)
     }
 
+    /// A flood advert using the current structured MeshCore application data.
+    pub fn advert_frame_data(&mut self, timestamp: u32, data: &AdvertData) -> Option<Vec<u8>> {
+        Some(self.advert_frame(timestamp, &data.encode()?))
+    }
+
     /// A flood text-message frame to a known contact `to`. `None` if `to` is unknown (we need
     /// its public key to derive the cipher key). Returns the frame and the ack to await.
     pub fn text_frame(&mut self, to: u8, timestamp: u32, text: &str) -> Option<(Vec<u8>, [u8; 4])> {
-        let peer = self.contacts.get(&to).cloned()?;
-        let secret = self.identity.shared_secret(&peer)?;
-        let message = TextMessage::plain(timestamp, text);
-        let expected_ack = message.ack_crc(&self.me.pub_key);
-        let payload = message.encode(&secret, to, self.my_hash());
-        let mut packet = Packet::new(ROUTE_FLOOD, payload_type::TXT_MSG);
-        packet.payload = payload;
-        Some((self.seal_outgoing(&packet), expected_ack))
+        let mut pending = self.begin_text(to, timestamp, text, TextRetryPolicy::default())?;
+        let attempt = self.next_text_attempt(&mut pending)?;
+        Some((attempt.frame, attempt.ack))
     }
 
     /// A flood ACK frame carrying `ack`.
@@ -193,6 +514,13 @@ impl Node {
         let mut packet = Packet::new(ROUTE_FLOOD, payload_type::ACK);
         packet.payload = encode_ack(ack);
         self.seal_outgoing(&packet)
+    }
+
+    /// An ACK to a known contact, sent directly when a route is known and flooded otherwise.
+    pub fn ack_frame_to(&mut self, to: u8, ack: [u8; 4]) -> Vec<u8> {
+        let mut packet = Packet::new(ROUTE_FLOOD, payload_type::ACK);
+        packet.payload = encode_ack(ack);
+        self.route_outgoing(to, packet)
     }
 }
 
@@ -208,7 +536,11 @@ mod tests {
     fn two_nodes_advert_then_message_and_ack() {
         let mut alice = node(0x11, false);
         let mut bob = node(0x22, false);
-        assert_ne!(alice.my_hash(), bob.my_hash(), "seeds must not collide on the 1-byte hash");
+        assert_ne!(
+            alice.my_hash(),
+            bob.my_hash(),
+            "seeds must not collide on the 1-byte hash"
+        );
 
         // Adverts both ways: each learns the other.
         let a_adv = alice.advert_frame(100, b"alice");
@@ -252,6 +584,27 @@ mod tests {
     }
 
     #[test]
+    fn operator_can_set_a_validated_route_for_a_known_contact() {
+        let mut alice = node(0x11, false);
+        let mut bob = node(0x22, false);
+        alice.on_frame(&bob.advert_frame(1, b"bob"));
+
+        assert!(DirectRoute::new(2, &[0x33]).is_none());
+        assert!(!alice.set_route(
+            0xff,
+            DirectRoute::new(1, &[0x33]).expect("valid one-hop route")
+        ));
+        assert!(alice.set_route(
+            bob.my_hash(),
+            DirectRoute::new(1, &[0x33]).expect("valid one-hop route")
+        ));
+        assert_eq!(
+            alice.route_to(bob.my_hash()).expect("route stored").path(),
+            &[0x33]
+        );
+    }
+
+    #[test]
     fn a_repeater_forwards_a_flood_it_is_not_the_target_of() {
         let mut alice = node(0x11, false);
         let mut repeater = node(0x33, true); // allow_forward
@@ -286,6 +639,153 @@ mod tests {
         // Carol is not the target: no Message event, but she forwards it.
         let (events, out) = carol.on_frame(&txt);
         assert!(!events.iter().any(|e| matches!(e, Event::Message { .. })));
-        assert_eq!(out.len(), 1, "carol forwards a message not addressed to her");
+        assert_eq!(
+            out.len(),
+            1,
+            "carol forwards a message not addressed to her"
+        );
+    }
+
+    #[test]
+    fn flood_message_establishes_reciprocal_direct_routes() {
+        let mut alice = node(0x11, false);
+        let mut bob = node(0x22, false);
+        let mut repeater = node(0x33, true);
+
+        // Each endpoint learns the other's identity through the repeater.
+        let a_adv = alice.advert_frame(1, b"alice");
+        let (_, forwarded) = repeater.on_frame(&a_adv);
+        bob.on_frame(&forwarded[0]);
+        let b_adv = bob.advert_frame(2, b"bob");
+        let (_, forwarded) = repeater.on_frame(&b_adv);
+        alice.on_frame(&forwarded[0]);
+
+        // The first text floods. Bob's generated PATH response carries its ACK and Alice's
+        // outbound route inside the pairwise cipher.
+        let (first, expected_ack) = alice.text_frame(bob.my_hash(), 3, "find a path").unwrap();
+        assert!(Packet::decode(&first).unwrap().is_flood());
+        let (_, forwarded) = repeater.on_frame(&first);
+        let (events, bob_out) = bob.on_frame(&forwarded[0]);
+        assert!(matches!(events.as_slice(), [Event::Message { .. }]));
+        assert_eq!(bob_out.len(), 1, "bob emits a PATH response");
+
+        let (_, forwarded) = repeater.on_frame(&bob_out[0]);
+        let (events, alice_out) = alice.on_frame(&forwarded[0]);
+        assert!(matches!(events.as_slice(), [Event::Ack(ack)] if *ack == expected_ack));
+        assert_eq!(
+            alice.route_to(bob.my_hash()).unwrap().path(),
+            &[repeater.my_hash()]
+        );
+        assert_eq!(
+            alice_out.len(),
+            1,
+            "alice returns the reciprocal path directly"
+        );
+
+        let (_, forwarded) = repeater.on_frame(&alice_out[0]);
+        bob.on_frame(&forwarded[0]);
+        assert_eq!(
+            bob.route_to(alice.my_hash()).unwrap().path(),
+            &[repeater.my_hash()]
+        );
+
+        // Later text and its addressed ACK use the learned source routes in both directions.
+        let (second, ack) = alice.text_frame(bob.my_hash(), 4, "now direct").unwrap();
+        let second = Packet::decode(&second).unwrap();
+        assert_eq!(second.route_type(), ROUTE_DIRECT);
+        assert_eq!(second.path, vec![repeater.my_hash()]);
+        let (_, forwarded) = repeater.on_frame(&second.encode());
+        let (events, _) = bob.on_frame(&forwarded[0]);
+        assert!(
+            matches!(events.as_slice(), [Event::Message { message, .. }] if message.text == "now direct")
+        );
+
+        let ack_frame = bob.ack_frame_to(alice.my_hash(), ack);
+        assert_eq!(
+            Packet::decode(&ack_frame).unwrap().route_type(),
+            ROUTE_DIRECT
+        );
+        let (_, forwarded) = repeater.on_frame(&ack_frame);
+        let (events, _) = alice.on_frame(&forwarded[0]);
+        assert!(matches!(events.as_slice(), [Event::Ack(got)] if *got == ack));
+    }
+
+    fn establish_route(alice: &mut Node, bob: &mut Node, repeater: &mut Node) {
+        let a_adv = alice.advert_frame(1, b"alice");
+        let (_, forwarded) = repeater.on_frame(&a_adv);
+        bob.on_frame(&forwarded[0]);
+        let b_adv = bob.advert_frame(2, b"bob");
+        let (_, forwarded) = repeater.on_frame(&b_adv);
+        alice.on_frame(&forwarded[0]);
+
+        let (first, _) = alice.text_frame(bob.my_hash(), 3, "learn route").unwrap();
+        let (_, forwarded) = repeater.on_frame(&first);
+        let (_, bob_out) = bob.on_frame(&forwarded[0]);
+        let (_, forwarded) = repeater.on_frame(&bob_out[0]);
+        let (_, alice_out) = alice.on_frame(&forwarded[0]);
+        let (_, forwarded) = repeater.on_frame(&alice_out[0]);
+        bob.on_frame(&forwarded[0]);
+    }
+
+    #[test]
+    fn direct_retries_clear_the_path_and_flood_the_last_attempt() {
+        let mut alice = node(0x11, false);
+        let mut bob = node(0x22, false);
+        let mut repeater = node(0x33, true);
+        establish_route(&mut alice, &mut bob, &mut repeater);
+        assert!(alice.route_to(bob.my_hash()).is_some());
+
+        let mut pending = alice
+            .begin_text(bob.my_hash(), 10, "retry me", TextRetryPolicy::default())
+            .unwrap();
+        let attempts: Vec<_> = (0..4)
+            .map(|_| alice.next_text_attempt(&mut pending).unwrap())
+            .collect();
+
+        assert_eq!(
+            attempts
+                .iter()
+                .map(|attempt| attempt.attempt)
+                .collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert!(attempts[..3].iter().all(|attempt| !attempt.flooded));
+        assert!(attempts[3].flooded);
+        assert!(alice.route_to(bob.my_hash()).is_none());
+        assert_eq!(pending.attempts_remaining(), 0);
+        assert!(alice.next_text_attempt(&mut pending).is_none());
+    }
+
+    #[test]
+    fn delayed_ack_from_any_attempt_completes_the_send() {
+        let mut alice = node(0x11, false);
+        let mut bob = node(0x22, false);
+        alice.on_frame(&bob.advert_frame(1, b"bob"));
+
+        let mut pending = alice
+            .begin_text(bob.my_hash(), 10, "eventually", TextRetryPolicy::default())
+            .unwrap();
+        let first = alice.next_text_attempt(&mut pending).unwrap();
+        let second = alice.next_text_attempt(&mut pending).unwrap();
+        assert_ne!(first.ack, second.ack, "attempt is covered by the ACK hash");
+        assert!(pending.acknowledge(first.ack));
+        assert!(pending.is_complete());
+        assert!(alice.next_text_attempt(&mut pending).is_none());
+    }
+
+    #[test]
+    fn flood_fallback_can_be_disabled() {
+        let mut alice = node(0x11, false);
+        let mut bob = node(0x22, false);
+        let mut repeater = node(0x33, true);
+        establish_route(&mut alice, &mut bob, &mut repeater);
+
+        let policy = TextRetryPolicy::new(2, false).unwrap();
+        let mut pending = alice
+            .begin_text(bob.my_hash(), 10, "stay direct", policy)
+            .unwrap();
+        assert!(!alice.next_text_attempt(&mut pending).unwrap().flooded);
+        assert!(!alice.next_text_attempt(&mut pending).unwrap().flooded);
+        assert!(alice.route_to(bob.my_hash()).is_some());
     }
 }
