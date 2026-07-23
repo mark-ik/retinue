@@ -2,8 +2,8 @@
 
 Facts observed from a black-box capture (`tests/fixtures/meshtastic_config.json`,
 `capture/capture_config.py`), decoded with Sennet's own protobuf reader. Field
-numbers and wire types are observable facts. **Meanings are not asserted here**;
-the semantic reconstruction is a separate process gated on counsel review (see
+numbers and wire types are observable facts. Meanings are introduced only by a
+recorded radio-bench experiment or a cited public description (see
 `PROVENANCE.md`).
 
 ## Handshake
@@ -76,34 +76,37 @@ decoded sub-message (`field 2 > field 4`), its two fields were:
 - `field 2` bytes = the payload, which was **valid readable UTF-8**: the exact message that
   was sent.
 
-That a readable message rode under tag 1 at this path is a direct observation (we read the
-text). It is recorded as the observed fact it is; the fuller schema — every tag, every message
-type, field names — remains for the gated reconstruction below.
+That a readable message rode under port 1 at this path is a direct observation.
+Sennet now implements that narrow application envelope and text path. Other
+ports and inner fields remain numbered until an experiment supports a useful
+name.
 
-## RF participation vs. observation (hardware finding, 2026-07-22)
+## RF participation and observation (hardware finding, 2026-07-22)
 
-Two distinct capabilities, with very different reach on current hardware:
+The client API and direct-PHY paths are both working:
 
-- **Observe / manage** (this crate today): connect to a node's client API over
+- **Observe / manage:** connect to a node's client API over
   USB/TCP/BLE, read its config and received traffic, drive it. Fully working —
   the Stream framing and protobuf reader here do it, verified against live
   devices.
-- **Participate over RF** (be a node on the mesh): requires transmitting the
-  over-the-air frame with Meshtastic's LoRa sync word (`0x2B`). The RNode radio
-  interface (what `tulle` drives) exposes frequency/bandwidth/SF/CR/power but
-  **not the sync word**, and is fixed to Reticulum's. So Sennet cannot join a
-  mesh through an RNode; RF participation needs direct SX1262 PHY control
-  (embedded firmware), which is future work, not this bench.
+- **Participate over RF:** Tulle's direct SX1262 firmware controls sync word
+  `0x2B` and the complete LongFast PHY. COM6 transmitted Sennet transport and
+  application packets to stock COM7; COM7 accepted and rebroadcast them. COM6
+  also captured stock COM7 traffic and the rebroadcast.
 
-The transport layer (16-byte header + AES256-CTR) is documented in public
-prose and public third-party analyses; building it clean-room means citing
-those sources or observing a raw frame, never reconstructing from memory
-(which could be tainted by the GPL source). Since it cannot be RF-verified on
-current hardware anyway, it waits for the direct-PHY path.
+The RNode serial personality still cannot set the required sync word. That is a
+limitation of that personality, rather than a blocker for the shared direct-PHY
+radio workspace.
 
-## What comes next (and the discipline for it)
+## Continuing reconstruction
 
-Reconstructing what each variant and its inner fields *mean* is done only from
-this observation plus public prose, authored independently, recorded per
-message, and reviewed by counsel before permissive publication. Nothing in this
-file crosses that line: it is the shape of the bytes, not anyone's schema.
+The bench is intended to keep three reflashable radios in rotation: a stock
+oracle, the Rust implementation under test, and a second board or firmware path
+that catches hardware-specific assumptions. Each receipt states which roles
+were actually exercised. The present text receipt covers COM6 and COM7; the
+third-board run remains the portability check.
+
+Future variants are reconstructed one controlled experiment at a time. Vary an
+input, retain the emitted and accepted bytes, implement the narrow behavior the
+experiment supports, and record where the claim stops. There is no counsel or
+source-count gate.

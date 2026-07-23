@@ -2,11 +2,27 @@
 name = "sennet"
 version = "0.0.1"
 edition = "2024"
-description = "Independent, permissively licensed mesh radio protocol implementation in the retinue family. Name reservation; development upcoming."
+description = "Independent, permissively licensed mesh radio protocol implementation in the retinue family."
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mark-ik/sennet"
 readme = "README.md"
 keywords = ["lora", "mesh", "radio", "reticulum"]
 categories = ["network-programming", "embedded"]
 
+[features]
+default = []
+hardware = ["dep:tokio", "dep:tulle"]
+
 [dependencies]
+aes = "0.8.4"
+ctr = "0.9.2"
+tokio = { version = "1", features = ["macros", "rt", "time"], optional = true }
+tulle = { version = "0.0.1", path = "../tulle", features = ["serial-async"], optional = true }
+
+[[example]]
+name = "direct_phy_text"
+required-features = ["hardware"]
+
+[[example]]
+name = "direct_phy_receive"
+required-features = ["hardware"]

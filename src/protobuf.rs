@@ -41,11 +41,25 @@ pub struct Field<'a> {
 pub struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    failed: bool,
 }
 
 impl<'a> Reader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
-        Reader { buf, pos: 0 }
+        Reader {
+            buf,
+            pos: 0,
+            failed: false,
+        }
+    }
+
+    /// Whether the reader consumed the complete message without encountering a
+    /// truncated field or unsupported wire type.
+    ///
+    /// Call this after iterating when malformed input must be distinguished
+    /// from an ordinary end of message.
+    pub fn is_complete(&self) -> bool {
+        !self.failed && self.pos == self.buf.len()
     }
 
     fn read_varint(&mut self) -> Option<u64> {
@@ -70,29 +84,40 @@ impl<'a> Reader<'a> {
         self.pos += n;
         Some(slice)
     }
+
+    fn read_field(&mut self) -> Option<Field<'a>> {
+        let tag = self.read_varint()?;
+        let number = u32::try_from(tag >> 3).ok()?;
+        if number == 0 {
+            return None;
+        }
+        let wire_type = (tag & 0x7) as u8;
+        let value = match wire_type {
+            0 => Value::Varint(self.read_varint()?),
+            1 => Value::I64(self.take(8)?.try_into().ok()?),
+            2 => {
+                let len = usize::try_from(self.read_varint()?).ok()?;
+                Value::Len(self.take(len)?)
+            }
+            5 => Value::I32(self.take(4)?.try_into().ok()?),
+            _ => return None,
+        };
+        Some(Field { number, value })
+    }
 }
 
 impl<'a> Iterator for Reader<'a> {
     type Item = Field<'a>;
 
     fn next(&mut self) -> Option<Field<'a>> {
-        if self.pos >= self.buf.len() {
+        if self.failed || self.pos >= self.buf.len() {
             return None;
         }
-        let tag = self.read_varint()?;
-        let number = u32::try_from(tag >> 3).ok()?;
-        let wire_type = (tag & 0x7) as u8;
-        let value = match wire_type {
-            0 => Value::Varint(self.read_varint()?),
-            1 => Value::I64(self.take(8)?.try_into().ok()?),
-            2 => {
-                let len = self.read_varint()? as usize;
-                Value::Len(self.take(len)?)
-            }
-            5 => Value::I32(self.take(4)?.try_into().ok()?),
-            _ => return None, // 3/4 groups (deprecated) and any invalid type: stop
-        };
-        Some(Field { number, value })
+        let field = self.read_field();
+        if field.is_none() {
+            self.failed = true;
+        }
+        field
     }
 }
 
@@ -142,7 +167,13 @@ mod tests {
         // field 1, varint, value 150: tag 0x08, value 0x96 0x01.
         let msg = [0x08, 0x96, 0x01];
         let fields: Vec<_> = Reader::new(&msg).collect();
-        assert_eq!(fields, vec![Field { number: 1, value: Value::Varint(150) }]);
+        assert_eq!(
+            fields,
+            vec![Field {
+                number: 1,
+                value: Value::Varint(150)
+            }]
+        );
     }
 
     #[test]
@@ -151,7 +182,13 @@ mod tests {
         let mut msg = vec![0x12, 0x07];
         msg.extend_from_slice(b"testing");
         let fields: Vec<_> = Reader::new(&msg).collect();
-        assert_eq!(fields, vec![Field { number: 2, value: Value::Len(b"testing") }]);
+        assert_eq!(
+            fields,
+            vec![Field {
+                number: 2,
+                value: Value::Len(b"testing")
+            }]
+        );
     }
 
     #[test]
@@ -174,8 +211,20 @@ mod tests {
             0,
         ];
         let fields: Vec<_> = Reader::new(&msg).collect();
-        assert_eq!(fields[0], Field { number: 3, value: Value::I32([4, 3, 2, 1]) });
-        assert_eq!(fields[1], Field { number: 4, value: Value::I64([1, 0, 0, 0, 0, 0, 0, 0]) });
+        assert_eq!(
+            fields[0],
+            Field {
+                number: 3,
+                value: Value::I32([4, 3, 2, 1])
+            }
+        );
+        assert_eq!(
+            fields[1],
+            Field {
+                number: 4,
+                value: Value::I64([1, 0, 0, 0, 0, 0, 0, 0])
+            }
+        );
     }
 
     #[test]
@@ -189,7 +238,13 @@ mod tests {
             panic!("expected LEN");
         };
         let inner_fields: Vec<_> = Reader::new(nested).collect();
-        assert_eq!(inner_fields, vec![Field { number: 1, value: Value::Varint(42) }]);
+        assert_eq!(
+            inner_fields,
+            vec![Field {
+                number: 1,
+                value: Value::Varint(42)
+            }]
+        );
     }
 
     #[test]
@@ -203,7 +258,26 @@ mod tests {
     fn stops_cleanly_at_truncation() {
         // A LEN field claiming 9 bytes but only 3 present: yields nothing, does not panic.
         let msg = [0x12, 0x09, b'a', b'b', b'c'];
-        assert!(Reader::new(&msg).next().is_none());
+        let mut reader = Reader::new(&msg);
+        assert!(reader.next().is_none());
+        assert!(!reader.is_complete());
+    }
+
+    #[test]
+    fn reports_a_complete_message() {
+        let msg = [0x08, 0x01, 0x12, 0x02, b'h', b'i'];
+        let mut reader = Reader::new(&msg);
+        assert_eq!(reader.by_ref().count(), 2);
+        assert!(reader.is_complete());
+    }
+
+    #[test]
+    fn rejects_field_zero_and_unsupported_wire_types() {
+        for msg in [[0x00], [0x0b]] {
+            let mut reader = Reader::new(&msg);
+            assert!(reader.next().is_none());
+            assert!(!reader.is_complete());
+        }
     }
 
     #[test]
@@ -211,7 +285,15 @@ mod tests {
         for v in [0u64, 1, 127, 128, 300, 16384, u64::MAX] {
             let mut out = Vec::new();
             write_varint(v, &mut out);
-            assert_eq!(Reader { buf: &out, pos: 0 }.read_varint(), Some(v));
+            assert_eq!(
+                Reader {
+                    buf: &out,
+                    pos: 0,
+                    failed: false,
+                }
+                .read_varint(),
+                Some(v)
+            );
         }
     }
 }

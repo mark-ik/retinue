@@ -7,7 +7,6 @@
 //! wire observation and public documentation, and is not affiliated with or
 //! endorsed by any existing mesh project.
 //!
-//! This release reserves the name; the crate is under active design.
 //! A sennet is a ceremonial fanfare for a procession.
 //!
 //! # Provenance
@@ -17,5 +16,10 @@
 //! standard, or direct observation of bytes a device emits. No third-party protocol source,
 //! schema definition, or client library was consulted. See `PROVENANCE.md`.
 
+pub mod application;
+pub mod flood;
+pub mod node;
+pub mod packet_id;
 pub mod protobuf;
 pub mod stream;
+pub mod transport;

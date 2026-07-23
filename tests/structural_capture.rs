@@ -2,8 +2,8 @@
 //!
 //! Proves Sennet's stream deframer and protobuf reader parse genuine device output, and
 //! records the *structure* the device emits — the field numbers and wire types present in the
-//! FromRadio stream — without asserting what any field means. That semantic reconstruction is
-//! a separate, documented process (see PROVENANCE.md); this test stops at observable facts.
+//! FromRadio stream. Named application behavior is reconstructed separately through documented
+//! radio-bench experiments (see PROVENANCE.md).
 
 use std::collections::BTreeMap;
 
@@ -73,11 +73,16 @@ fn summarize_variant_numbers_present() {
     }
     // A config stream carries several distinct variants and ends with a completion marker,
     // so more than one distinct top-level number must appear.
-    assert!(counts.len() >= 3, "expected several distinct config variants");
+    assert!(
+        counts.len() >= 3,
+        "expected several distinct config variants"
+    );
 
     // The nested payloads must themselves be well-formed protobuf (they parse structurally).
     for frame in &frames {
-        let Some(top) = Reader::new(frame).next() else { continue };
+        let Some(top) = Reader::new(frame).next() else {
+            continue;
+        };
         if let Value::Len(inner) = top.value {
             // Descending must not panic and must consume cleanly for at least one field.
             let inner_fields: Vec<_> = Reader::new(inner).collect();
@@ -161,14 +166,15 @@ fn decoded_tag_and_payload(frame: &[u8]) -> Option<(u64, Vec<u8>)> {
 
 /// A real over-the-air text message, captured black-box, is walked to its payload by Sennet's
 /// reader, and that payload is the readable UTF-8 that was sent. This records the one directly
-/// observed semantic fact — the tag under which a readable message rode — as a test; the fuller
-/// schema stays gated (PROVENANCE.md).
+/// observed semantic fact, the port under which a readable message rode, as a test. Other fields
+/// remain numbered until experiments give them useful names (PROVENANCE.md).
 #[test]
 fn a_captured_text_message_decodes_to_readable_utf8() {
     let frames = load_frames("meshtastic_textmsg.json");
     assert!(!frames.is_empty(), "a text frame was captured");
     for frame in &frames {
-        let (tag, payload) = decoded_tag_and_payload(frame).expect("envelope descends to a payload");
+        let (tag, payload) =
+            decoded_tag_and_payload(frame).expect("envelope descends to a payload");
         let text = std::str::from_utf8(&payload).expect("the text payload is valid UTF-8");
         println!("observed text under tag {tag}: {text:?}");
         assert!(!text.is_empty());
