@@ -26,3 +26,7 @@ required-features = ["hardware"]
 [[example]]
 name = "direct_phy_receive"
 required-features = ["hardware"]
+
+[[example]]
+name = "direct_phy_pair"
+required-features = ["hardware"]
