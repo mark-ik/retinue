@@ -1,6 +1,6 @@
 [package]
 name = "tulle"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "Shared radio interface layer for LoRa mesh stacks: serial modem control, direct PHY, and medium access."
 license = "MPL-2.0"

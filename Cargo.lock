@@ -1834,7 +1834,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "retinue"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "aes 0.9.1",
  "bzip2",
@@ -1986,7 +1986,7 @@ checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
 
 [[package]]
 name = "sennet"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "aes 0.8.4",
  "ctr",
@@ -2391,7 +2391,7 @@ dependencies = [
 
 [[package]]
 name = "tucket"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "aes 0.8.4",
  "curve25519-dalek",
@@ -2406,7 +2406,7 @@ dependencies = [
 
 [[package]]
 name = "tulle"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "selvage",
  "serde_json",

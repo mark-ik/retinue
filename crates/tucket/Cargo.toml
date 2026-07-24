@@ -1,6 +1,6 @@
 [package]
 name = "tucket"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 description = "MeshCore interop for the retinue radio family: node management, routing, and text interop over LoRa mesh."
 license = "MPL-2.0"
@@ -22,7 +22,7 @@ serial2-tokio = { version = "0.1.24", optional = true }
 sha2 = "0.10"
 subtle = "2"
 tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "time"], optional = true }
-tulle = { version = "0.0.1", path = "../tulle", features = ["serial-async"], optional = true }
+tulle = { version = "0.0.2", path = "../tulle", features = ["serial-async"], optional = true }
 
 [[example]]
 name = "meshcore_headed"
