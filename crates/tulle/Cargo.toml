@@ -16,7 +16,7 @@ serial-async = ["dep:serial2-tokio", "dep:tokio"]
 [dependencies]
 serial2-tokio = { version = "0.1.24", optional = true }
 tokio = { version = "1.53.1", features = ["io-util", "rt", "sync", "time"], optional = true }
-tulle-phy-profile = { path = "../phy-profile" }
+tulle-phy-profile = { version = "0.0.1", path = "../phy-profile" }
 
 [dev-dependencies]
 serde_json = "1.0.151"

@@ -3,7 +3,10 @@ name = "tulle-phy-profile"
 version = "0.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/mark-ik/retinue"
 description = "Clean-room LoRa PHY profiles shared by Tulle host and embedded code."
+keywords = ["lora", "radio", "phy", "embedded"]
+categories = ["embedded", "no-std"]
 
 [lib]
 path = "src/lib.rs"
