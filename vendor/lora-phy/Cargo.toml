@@ -13,6 +13,10 @@
 edition = "2021"
 name = "lora-phy"
 version = "3.0.1"
+# This is a VENDORED FORK of someone else's crate, pulled in as an implicit
+# workspace member through the firmware's path dependency. It must never be
+# published from here: the name belongs upstream.
+publish = false
 description = "A LoRa physical layer implementation enabling utilization of a range of MCU/LoRa board combinations within embedded frameworks supporting embedded-hal-async."
 readme = "README.md"
 keywords = [
