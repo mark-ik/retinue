@@ -1,0 +1,6 @@
+{
+ "_comment": "Over-the-air TEXT messages (portnum 1) captured black-box 2026-07-22, received by a Meshtastic observer node over the air. frames=raw FromRadio payloads hex. Portnum 1 was observed to carry a readable UTF-8 payload (the sent messages). Field meanings beyond this direct observation are not asserted.",
+ "frames": [
+  "128c010d64fa6af615ffffffff226708011261546869732069732061207075626c696320746573742c2061706f6c6f6769657320696620616e796f6e65206973206c697374656e696e672e20506c65617365206c6574206d65206b6e6f7720696620796f752063616e2073656520746869732e204800352c92e7203d5644606a450000c84048037803980164a80101"
+ ]
+}
