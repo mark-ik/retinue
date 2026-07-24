@@ -20,4 +20,4 @@ lora-modulation = "0.1.5"
 lora-phy = { path = "../../vendor/lora-phy" }
 panic-halt = "1.0.0"
 static_cell = "2.1.1"
-tulle-phy-profile = { path = "../../crates/phy-profile" }
+selvage = { path = "../../crates/selvage" }

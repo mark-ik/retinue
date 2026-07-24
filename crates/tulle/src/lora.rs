@@ -17,7 +17,7 @@
 //! derived, never stored: storing it invites a transmitter/receiver mismatch.
 
 use core::time::Duration;
-use tulle_phy_profile::PhyProfile;
+use selvage::PhyProfile;
 
 /// LoRa coding rate, `4/(4+n)`. The wire encoding is `1..=4`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

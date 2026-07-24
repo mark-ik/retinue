@@ -474,12 +474,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let mut configure = [0_u8; tulle_phy_profile::CONFIG_COMMAND_LEN];
+            let mut configure = [0_u8; selvage::CONFIG_COMMAND_LEN];
             firmware.read_exact(&mut configure).await.unwrap();
-            assert_eq!(
-                tulle_phy_profile::decode_config_command(&configure),
-                Ok(profile())
-            );
+            assert_eq!(selvage::decode_config_command(&configure), Ok(profile()));
             firmware
                 .write_all(&[direct_phy::EVENT_CONFIG, 0])
                 .await
@@ -525,12 +522,9 @@ mod tests {
             let mut status = [0_u8; 7];
             firmware.read_exact(&mut status).await.unwrap();
             assert_eq!(&status, b"status\n");
-            let mut configure = [0_u8; tulle_phy_profile::CONFIG_COMMAND_LEN];
+            let mut configure = [0_u8; selvage::CONFIG_COMMAND_LEN];
             firmware.read_exact(&mut configure).await.unwrap();
-            assert_eq!(
-                tulle_phy_profile::decode_config_command(&configure),
-                Ok(profile())
-            );
+            assert_eq!(selvage::decode_config_command(&configure), Ok(profile()));
 
             firmware.read_exact(&mut status).await.unwrap();
             assert_eq!(&status, b"status\n");
@@ -539,10 +533,7 @@ mod tests {
                 .await
                 .unwrap();
             firmware.read_exact(&mut configure).await.unwrap();
-            assert_eq!(
-                tulle_phy_profile::decode_config_command(&configure),
-                Ok(profile())
-            );
+            assert_eq!(selvage::decode_config_command(&configure), Ok(profile()));
             firmware
                 .write_all(&[direct_phy::EVENT_CONFIG, 0])
                 .await

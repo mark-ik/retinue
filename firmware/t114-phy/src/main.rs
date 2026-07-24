@@ -22,11 +22,11 @@ use lora_phy::mod_traits::InterfaceVariant;
 use lora_phy::sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage};
 use lora_phy::{LoRa, RxMode};
 use panic_halt as _;
-use static_cell::StaticCell;
-use tulle_phy_profile::{
+use selvage::{
     CMD_CONFIG, CMD_TX, CONFIG_COMMAND_LEN, EVENT_CONFIG, EVENT_DIAGNOSTIC, EVENT_RX, EVENT_TX,
     MESHTASTIC_SYNC_WORD, decode_config_command, sx126x_sync_word,
 };
+use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
     USBD => usb::InterruptHandler<peripherals::USBD>;

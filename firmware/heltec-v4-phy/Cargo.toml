@@ -18,4 +18,4 @@ esp-println = { version = "0.17.0", default-features = false, features = ["esp32
 esp-rtos = { version = "0.3.0", features = ["embassy", "esp32s3"] }
 lora-modulation = "0.1.5"
 lora-phy = { path = "../../vendor/lora-phy" }
-tulle-phy-profile = { path = "../../crates/phy-profile" }
+selvage = { path = "../../crates/selvage" }

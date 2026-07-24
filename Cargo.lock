@@ -1954,6 +1954,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "selvage"
+version = "0.0.1"
+
+[[package]]
 name = "semihosting"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2404,10 +2408,10 @@ dependencies = [
 name = "tulle"
 version = "0.0.1"
 dependencies = [
+ "selvage",
  "serde_json",
  "serial2-tokio",
  "tokio",
- "tulle-phy-profile",
 ]
 
 [[package]]
@@ -2426,12 +2430,8 @@ dependencies = [
  "esp-rtos",
  "lora-modulation",
  "lora-phy",
- "tulle-phy-profile",
+ "selvage",
 ]
-
-[[package]]
-name = "tulle-phy-profile"
-version = "0.0.1"
 
 [[package]]
 name = "tulle-t114-phy"
@@ -2450,8 +2450,8 @@ dependencies = [
  "lora-modulation",
  "lora-phy",
  "panic-halt",
+ "selvage",
  "static_cell",
- "tulle-phy-profile",
 ]
 
 [[package]]

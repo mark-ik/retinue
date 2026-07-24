@@ -17,7 +17,7 @@ for Tulle's USB direct-PHY firmware. It handles split USB events, bounded queues
 transmit acknowledgements, RSSI/SNR delivery, and the shared airtime budget.
 
 The workspace also contains direct-PHY Embassy firmware for the Heltec WiFi
-LoRa 32 v4 and T114, plus a reusable `tulle-phy-profile` crate. Both targets
+LoRa 32 v4 and T114, plus a reusable `selvage` crate. Both targets
 program the documented `0x2B` sync word directly as SX1262 registers `0x24B4`
 and expose binary USB commands for raw packet transmit and receive with
 RSSI/SNR. The v4 target has passed bidirectional LongFast acceptance against a

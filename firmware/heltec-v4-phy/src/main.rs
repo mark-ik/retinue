@@ -20,7 +20,7 @@ use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::sx126x::{Config as Sx126xConfig, Sx126x, Sx1262, TcxoCtrlVoltage};
 use lora_phy::{LoRa, RxMode};
-use tulle_phy_profile::{
+use selvage::{
     CMD_CONFIG, CMD_TX, CONFIG_COMMAND_LEN, EVENT_CONFIG, EVENT_RX, EVENT_TX, MESHTASTIC_SYNC_WORD,
     decode_config_command,
 };

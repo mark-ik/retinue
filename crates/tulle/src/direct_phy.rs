@@ -4,12 +4,10 @@
 //! interpret Reticulum, MeshCore, or Meshtastic-compatible bytes.
 
 use crate::link::Received;
-use tulle_phy_profile::{CONFIG_COMMAND_LEN, PhyProfile, ProfileError, encode_config_command};
+use selvage::{CONFIG_COMMAND_LEN, PhyProfile, ProfileError, encode_config_command};
 
 pub const MAX_FRAME_LEN: usize = 255;
-pub use tulle_phy_profile::{
-    CMD_CONFIG, CMD_TX, EVENT_CONFIG, EVENT_DIAGNOSTIC, EVENT_RX, EVENT_TX,
-};
+pub use selvage::{CMD_CONFIG, CMD_TX, EVENT_CONFIG, EVENT_DIAGNOSTIC, EVENT_RX, EVENT_TX};
 
 /// One event emitted by direct-PHY firmware.
 #[derive(Clone, Debug, PartialEq)]

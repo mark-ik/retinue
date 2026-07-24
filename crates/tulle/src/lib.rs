@@ -22,4 +22,4 @@ pub mod rnode;
 #[cfg(feature = "serial-async")]
 pub mod serial;
 
-pub use tulle_phy_profile::{PhyProfile, ProfileError};
+pub use selvage::{PhyProfile, ProfileError};

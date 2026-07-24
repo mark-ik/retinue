@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "crates/retinue",
     "crates/tulle",
-    "crates/phy-profile",
+    "crates/selvage",
     "crates/sennet",
     "crates/tucket",
     "firmware/heltec-v4-phy",
@@ -14,7 +14,7 @@ members = [
 default-members = [
     "crates/retinue",
     "crates/tulle",
-    "crates/phy-profile",
+    "crates/selvage",
     "crates/sennet",
     "crates/tucket",
 ]

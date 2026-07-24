@@ -10,7 +10,7 @@ its own README; this file is the map.
 |---|---|
 | [`retinue`](crates/retinue) | A Rust implementation of the Reticulum protocol: identity, announces, links, resources, and routing. The protocol is public domain; this is not the reference implementation ([reticulum.network](https://reticulum.network)). |
 | [`tulle`](crates/tulle) | Shared radio interface layer for LoRa mesh stacks: serial modem control, direct PHY, and medium access. |
-| [`tulle-phy-profile`](crates/phy-profile) | The PHY parameter profile shared by the host stacks and the firmware. |
+| [`selvage`](crates/selvage) | The PHY parameter profile shared by the host stacks and the firmware. |
 | [`sennet`](crates/sennet) | Independent, permissively licensed mesh radio protocol implementation, Meshtastic-compatible on the wire. |
 | [`tucket`](crates/tucket) | MeshCore interop: node management, routing, and text interop over LoRa mesh. |
 
