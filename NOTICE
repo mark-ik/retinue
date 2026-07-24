@@ -1,6 +1,19 @@
+# Third-party notices
+
+Tucket is licensed under the Mozilla Public License, Version 2.0 (see LICENSE).
+
+Portions of this crate — the MeshCore wire formats, cryptographic construction,
+dedup, and forwarding mechanics — were ported from the upstream MeshCore project
+(<https://github.com/ripplebiz/MeshCore>), which is MIT licensed. The MIT license
+permits relicensing derivative works, and requires that the original copyright
+and permission notice be retained. It is reproduced in full below, and applies to
+those ported portions.
+
+---
+
 MIT License
 
-Copyright (c) 2026 Mark AB (markik)
+Copyright (c) 2025 Scott Powell / rippleradios.com
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

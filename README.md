@@ -48,9 +48,14 @@ directions.
 
 ## License
 
-Licensed under either of
+Licensed under the Mozilla Public License, Version 2.0 ([LICENSE](LICENSE)).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+MPL-2.0 is file-level copyleft: you may use this crate in a larger work under
+any license, including a proprietary one, but modifications to *these files*
+must be published under the MPL. It is GPL-compatible, so it combines into the
+GPLv3 firmware images this project ships.
 
-at your option.
+Portions were ported from the upstream [MeshCore](https://github.com/ripplebiz/MeshCore)
+project, which is MIT licensed. MIT permits relicensing a derivative work and
+requires the original notice be retained; it is reproduced in [NOTICE](NOTICE)
+and applies to those portions.
