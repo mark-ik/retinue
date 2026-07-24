@@ -2,7 +2,7 @@
 
 MeshCore interop for the [retinue](https://github.com/mark-ik/retinue) radio
 family: node management and text interop with MeshCore mesh networks, on the
-shared [tulle](https://github.com/mark-ik/tulle) radio layer.
+shared [tulle](https://github.com/mark-ik/retinue) radio layer.
 
 A tucket is a trumpet flourish announcing a single arrival.
 

@@ -3,7 +3,7 @@
 An independent, permissively licensed mesh radio protocol implementation in
 the [retinue](https://github.com/mark-ik/retinue) family, targeting
 interoperability with existing LoRa messaging meshes, on the shared
-[tulle](https://github.com/mark-ik/tulle) radio layer.
+[tulle](https://github.com/mark-ik/retinue) radio layer.
 
 Sennet is an independent implementation, developed from wire observation and
 public documentation. It is not affiliated with or endorsed by any existing
