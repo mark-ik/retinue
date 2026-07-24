@@ -1,17 +1,20 @@
 #![no_std]
 #![no_main]
 
+use core::convert::Infallible;
+
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
 use embassy_nrf::config::HfclkSource;
 use embassy_nrf::gpio::{Input, Level, Output, OutputDrive, Pull};
-use embassy_nrf::spim::{self, Spim};
 use embassy_nrf::usb::Driver;
 use embassy_nrf::usb::vbus_detect::HardwareVbusDetect;
 use embassy_nrf::{bind_interrupts, peripherals, usb};
 use embassy_time::{Delay, Duration, Timer, with_timeout};
 use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config, UsbDevice};
+use embedded_hal::spi::ErrorType;
+use embedded_hal_async::spi::SpiBus;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use lora_modulation::{Bandwidth, CodingRate, SpreadingFactor};
 use lora_phy::mod_params::RadioError;
@@ -21,12 +24,11 @@ use lora_phy::{LoRa, RxMode};
 use panic_halt as _;
 use static_cell::StaticCell;
 use tulle_phy_profile::{
-    CMD_CONFIG, CMD_TX, CONFIG_COMMAND_LEN, EVENT_CONFIG, EVENT_RX, EVENT_TX, MESHTASTIC_SYNC_WORD,
-    decode_config_command, sx126x_sync_word,
+    CMD_CONFIG, CMD_TX, CONFIG_COMMAND_LEN, EVENT_CONFIG, EVENT_DIAGNOSTIC, EVENT_RX, EVENT_TX,
+    MESHTASTIC_SYNC_WORD, decode_config_command, sx126x_sync_word,
 };
 
 bind_interrupts!(struct Irqs {
-    SPIM3 => spim::InterruptHandler<peripherals::SPI3>;
     USBD => usb::InterruptHandler<peripherals::USBD>;
     CLOCK_POWER => usb::vbus_detect::InterruptHandler;
 });
@@ -37,6 +39,72 @@ const FREQUENCY_HZ: u32 = 906_875_000;
 const TX_POWER_DBM: i32 = 17;
 const MAX_RADIO_FRAME: usize = 255;
 const USB_PACKET: usize = 64;
+
+struct T114Spi<'d> {
+    sck: Output<'d>,
+    mosi: Output<'d>,
+    miso: Input<'d>,
+}
+
+impl T114Spi<'_> {
+    fn transfer_byte(&mut self, output: u8) -> u8 {
+        let mut input = 0u8;
+        for bit in (0..8).rev() {
+            if output & (1 << bit) == 0 {
+                self.mosi.set_low();
+            } else {
+                self.mosi.set_high();
+            }
+            cortex_m::asm::delay(64);
+            self.sck.set_high();
+            input = (input << 1) | u8::from(self.miso.is_high());
+            cortex_m::asm::delay(64);
+            self.sck.set_low();
+        }
+        input
+    }
+}
+
+impl ErrorType for T114Spi<'_> {
+    type Error = Infallible;
+}
+
+impl SpiBus<u8> for T114Spi<'_> {
+    async fn read(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        for word in words {
+            *word = self.transfer_byte(0);
+        }
+        Ok(())
+    }
+
+    async fn write(&mut self, words: &[u8]) -> Result<(), Self::Error> {
+        for &word in words {
+            let _ = self.transfer_byte(word);
+        }
+        Ok(())
+    }
+
+    async fn transfer(&mut self, read: &mut [u8], write: &[u8]) -> Result<(), Self::Error> {
+        for index in 0..read.len().max(write.len()) {
+            let input = self.transfer_byte(write.get(index).copied().unwrap_or(0));
+            if let Some(word) = read.get_mut(index) {
+                *word = input;
+            }
+        }
+        Ok(())
+    }
+
+    async fn transfer_in_place(&mut self, words: &mut [u8]) -> Result<(), Self::Error> {
+        for word in words {
+            *word = self.transfer_byte(*word);
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
 
 struct T114Interface<'d> {
     reset: Output<'d>,
@@ -124,6 +192,20 @@ fn coding_rate(value: u8) -> Option<CodingRate> {
     })
 }
 
+fn diagnostic_event(irq_status: u16, device_errors: u16, sync_word: [u8; 2]) -> [u8; 7] {
+    let irq = irq_status.to_le_bytes();
+    let errors = device_errors.to_le_bytes();
+    [
+        EVENT_DIAGNOSTIC,
+        irq[0],
+        irq[1],
+        errors[0],
+        errors[1],
+        sync_word[0],
+        sync_word[1],
+    ]
+}
+
 async fn write_all(class: &mut CdcAcmClass<'static, UsbDriver>, bytes: &[u8]) -> bool {
     for chunk in bytes.chunks(USB_PACKET) {
         if class.write_packet(chunk).await.is_err() {
@@ -192,9 +274,11 @@ async fn main(spawner: Spawner) {
         Err(_) => panic!(),
     }
 
-    let mut spi_config = spim::Config::default();
-    spi_config.frequency = spim::Frequency::M1;
-    let spi = Spim::new(p.SPI3, Irqs, p.P0_19, p.P0_23, p.P0_22, spi_config);
+    let spi = T114Spi {
+        sck: Output::new(p.P0_19, Level::Low, OutputDrive::Standard),
+        mosi: Output::new(p.P0_22, Level::Low, OutputDrive::Standard),
+        miso: Input::new(p.P0_23, Pull::None),
+    };
     let cs = Output::new(p.P0_24, Level::High, OutputDrive::Standard);
     let spi = match ExclusiveDevice::new(spi, cs, Delay) {
         Ok(spi) => spi,
@@ -271,8 +355,7 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let online =
-        b"tulle/t114 phy online; sx1262 online; irq=poll; sync=2b reg=24b4; longfast=906875000\r\n";
+    let online = b"tulle/t114 phy online; sx1262 online; spi=software; irq=poll; sync=2b reg=24b4; longfast=906875000\r\n";
     let mut usb_command = [0_u8; 3 + MAX_RADIO_FRAME];
     let mut usb_command_len;
     let mut tx_power_dbm = TX_POWER_DBM;
@@ -351,6 +434,20 @@ async fn main(spawner: Spawner) {
                             b"sync encoding fault\r\n".as_slice()
                         };
                         if !write_all(&mut class, reply).await {
+                            break;
+                        }
+                        continue;
+                    }
+                    if packet == b"radio\n" || packet == b"radio\r\n" {
+                        let reply = match lora.sx126x_diagnostics().await {
+                            Ok(diagnostics) => diagnostic_event(
+                                diagnostics.irq_status,
+                                diagnostics.device_errors,
+                                diagnostics.sync_word,
+                            ),
+                            Err(_) => [EVENT_DIAGNOSTIC, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                        };
+                        if !write_all(&mut class, &reply).await {
                             break;
                         }
                         continue;
@@ -482,6 +579,19 @@ async fn main(spawner: Spawner) {
                             Err(_) => 5,
                         }
                     };
+                    if result == 5 {
+                        let diagnostic = match lora.sx126x_diagnostics().await {
+                            Ok(diagnostics) => diagnostic_event(
+                                diagnostics.irq_status,
+                                diagnostics.device_errors,
+                                diagnostics.sync_word,
+                            ),
+                            Err(_) => [EVENT_DIAGNOSTIC, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+                        };
+                        if !write_all(&mut class, &diagnostic).await {
+                            break 'connected;
+                        }
+                    }
                     usb_command_len = 0;
                     prepare_rx = true;
                     let length_bytes = sent_len.to_le_bytes();

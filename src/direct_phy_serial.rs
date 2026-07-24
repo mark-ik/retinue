@@ -16,6 +16,8 @@ use crate::link::Received;
 use crate::lora::LoRaParams;
 use crate::serial::{PumpError, PumpStatus, TransmitError};
 
+const INITIALIZATION_RETRY: Duration = Duration::from_millis(500);
+
 /// Runtime settings for a direct-PHY serial link.
 #[derive(Clone, Debug)]
 pub struct DirectPhySerialConfig {
@@ -209,20 +211,47 @@ where
         }
     }
     let _ = status_tx.send(PumpStatus::Initializing);
+    let configure = direct_phy::encode_configure(profile).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid direct-PHY profile: {error:?}"),
+        )
+    })?;
     let mut decoder = Decoder::new();
     let mut read_buf = [0_u8; 1024];
     let mut status_bytes = Vec::new();
     let online_deadline = Instant::now() + config.online_timeout;
+    let mut next_probe = Instant::now() + INITIALIZATION_RETRY;
+    let mut saw_online = false;
+    let mut configured = false;
     io.write_all(b"status\n").await?;
     io.flush().await?;
+    sleep(Duration::from_millis(20)).await;
+    io.write_all(&configure).await?;
+    io.flush().await?;
     loop {
+        let wake_at = online_deadline.min(next_probe);
         tokio::select! {
             _ = &mut shutdown => return Ok(()),
-            _ = sleep_until(online_deadline) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "direct-PHY firmware did not report online",
-                ));
+            _ = sleep_until(wake_at) => {
+                if Instant::now() >= online_deadline {
+                    let missing = match (saw_online, configured) {
+                        (false, false) => "online status and radio profile acknowledgement",
+                        (false, true) => "online status",
+                        (true, false) => "radio profile acknowledgement",
+                        (true, true) => unreachable!(),
+                    };
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("direct-PHY firmware did not report {missing}"),
+                    ));
+                }
+                io.write_all(b"status\n").await?;
+                io.flush().await?;
+                sleep(Duration::from_millis(20)).await;
+                io.write_all(&configure).await?;
+                io.flush().await?;
+                next_probe = Instant::now() + INITIALIZATION_RETRY;
             }
             read = io.read(&mut read_buf) => {
                 let count = read?;
@@ -238,52 +267,13 @@ where
                 }
                 let text = String::from_utf8_lossy(&status_bytes);
                 if text.contains("tulle/") && text.contains("phy online") {
-                    break;
-                }
-                let mut events = Vec::new();
-                decoder.push(&read_buf[..count], &mut events);
-                for event in events {
-                    if let Event::Received(frame) = event
-                        && rx_tx.send(frame).await.is_err()
-                    {
-                        return Ok(());
-                    }
-                }
-            }
-        }
-    }
-
-    let configure = direct_phy::encode_configure(profile).map_err(|error| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("invalid direct-PHY profile: {error:?}"),
-        )
-    })?;
-    io.write_all(&configure).await?;
-    io.flush().await?;
-    let configure_deadline = Instant::now() + config.online_timeout;
-    'configure: loop {
-        tokio::select! {
-            _ = &mut shutdown => return Ok(()),
-            _ = sleep_until(configure_deadline) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "direct-PHY firmware did not acknowledge the radio profile",
-                ));
-            }
-            read = io.read(&mut read_buf) => {
-                let count = read?;
-                if count == 0 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "direct-PHY serial port closed during configuration",
-                    ));
+                    saw_online = true;
                 }
                 let mut events = Vec::new();
                 decoder.push(&read_buf[..count], &mut events);
                 for event in events {
                     match event {
-                        Event::Configured { result: 0 } => break 'configure,
+                        Event::Configured { result: 0 } => configured = true,
                         Event::Configured { result } => {
                             return Err(io::Error::other(format!(
                                 "direct-PHY firmware rejected the radio profile with result {result}"
@@ -294,8 +284,11 @@ where
                                 return Ok(());
                             }
                         }
-                        Event::Transmitted { .. } => {}
+                        Event::Transmitted { .. } | Event::Diagnostic { .. } => {}
                     }
+                }
+                if saw_online && configured {
+                    break;
                 }
             }
         }
@@ -307,6 +300,7 @@ where
     let mut in_flight: Option<InFlight> = None;
     let mut retry_at: Option<Instant> = None;
     let mut tx_closed = false;
+    let mut last_diagnostic = None;
 
     loop {
         if pending.is_none() && in_flight.is_none() && !tx_closed {
@@ -388,15 +382,31 @@ where
                                 let outcome = if result == 0 && frame_len == sent.frame_len {
                                     Ok(sent.airtime)
                                 } else {
+                                    let diagnostic = last_diagnostic
+                                        .take()
+                                        .map(|(irq, errors, sync): (u16, u16, [u8; 2])| {
+                                            format!(
+                                                "; irq=0x{irq:04x} errors=0x{errors:04x} sync={:02x}{:02x}",
+                                                sync[0], sync[1]
+                                            )
+                                        })
+                                        .unwrap_or_default();
                                     Err(TransmitError::Transport(format!(
-                                        "direct-PHY transmit result {result}, length {frame_len}, expected {}",
-                                        sent.frame_len
+                                        "direct-PHY transmit result {result}, length {frame_len}, expected {}{diagnostic}",
+                                        sent.frame_len,
                                     )))
                                 };
                                 let _ = sent.request.done.send(outcome);
                             }
                         }
                         Event::Configured { .. } => {}
+                        Event::Diagnostic {
+                            irq_status,
+                            device_errors,
+                            sync_word,
+                        } => {
+                            last_diagnostic = Some((irq_status, device_errors, sync_word));
+                        }
                     }
                 }
             }
@@ -491,6 +501,51 @@ mod tests {
         assert_eq!(received.frame, [7, 8, 9]);
         assert_eq!(received.rssi_dbm, -40);
         assert_eq!(received.snr_db, 9.0);
+        link.shutdown().await.unwrap();
+        firmware_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pump_retries_status_and_profile_during_startup() {
+        let (host, mut firmware) = tokio::io::duplex(2048);
+        let config = DirectPhySerialConfig {
+            open_settle: Duration::ZERO,
+            online_timeout: Duration::from_secs(2),
+            ..Default::default()
+        };
+        let budget = AirtimeBudget::new(60_000, 1000);
+        let mut link = DirectPhySerialLink::spawn_io(host, profile(), params(), budget, config);
+
+        let firmware_task = tokio::spawn(async move {
+            let mut status = [0_u8; 7];
+            firmware.read_exact(&mut status).await.unwrap();
+            assert_eq!(&status, b"status\n");
+            let mut configure = [0_u8; tulle_phy_profile::CONFIG_COMMAND_LEN];
+            firmware.read_exact(&mut configure).await.unwrap();
+            assert_eq!(
+                tulle_phy_profile::decode_config_command(&configure),
+                Ok(profile())
+            );
+
+            firmware.read_exact(&mut status).await.unwrap();
+            assert_eq!(&status, b"status\n");
+            firmware
+                .write_all(b"tulle/test phy online\r\n")
+                .await
+                .unwrap();
+            firmware.read_exact(&mut configure).await.unwrap();
+            assert_eq!(
+                tulle_phy_profile::decode_config_command(&configure),
+                Ok(profile())
+            );
+            firmware
+                .write_all(&[direct_phy::EVENT_CONFIG, 0])
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(1)).await;
+        });
+
+        link.wait_online().await.unwrap();
         link.shutdown().await.unwrap();
         firmware_task.await.unwrap();
     }

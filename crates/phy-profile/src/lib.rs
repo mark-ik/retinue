@@ -13,6 +13,8 @@ pub const CMD_CONFIG: u8 = 0x02;
 pub const EVENT_RX: u8 = 0x81;
 pub const EVENT_TX: u8 = 0x82;
 pub const EVENT_CONFIG: u8 = 0x83;
+/// Firmware-to-host SX126x diagnostic event marker.
+pub const EVENT_DIAGNOSTIC: u8 = 0x84;
 
 /// Bytes in a complete [`CMD_CONFIG`] command.
 pub const CONFIG_COMMAND_LEN: usize = 16;

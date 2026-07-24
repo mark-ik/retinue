@@ -7,14 +7,26 @@ use crate::link::Received;
 use tulle_phy_profile::{CONFIG_COMMAND_LEN, PhyProfile, ProfileError, encode_config_command};
 
 pub const MAX_FRAME_LEN: usize = 255;
-pub use tulle_phy_profile::{CMD_CONFIG, CMD_TX, EVENT_CONFIG, EVENT_RX, EVENT_TX};
+pub use tulle_phy_profile::{
+    CMD_CONFIG, CMD_TX, EVENT_CONFIG, EVENT_DIAGNOSTIC, EVENT_RX, EVENT_TX,
+};
 
 /// One event emitted by direct-PHY firmware.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
     Received(Received),
-    Transmitted { result: u8, frame_len: usize },
-    Configured { result: u8 },
+    Transmitted {
+        result: u8,
+        frame_len: usize,
+    },
+    Configured {
+        result: u8,
+    },
+    Diagnostic {
+        irq_status: u16,
+        device_errors: u16,
+        sync_word: [u8; 2],
+    },
 }
 
 /// Encode a complete runtime radio-profile command.
@@ -74,11 +86,9 @@ impl Decoder {
     pub fn push(&mut self, bytes: &[u8], out: &mut Vec<Event>) {
         self.buffer.extend_from_slice(bytes);
         loop {
-            let Some(start) = self
-                .buffer
-                .iter()
-                .position(|byte| matches!(*byte, EVENT_RX | EVENT_TX | EVENT_CONFIG))
-            else {
+            let Some(start) = self.buffer.iter().position(|byte| {
+                matches!(*byte, EVENT_RX | EVENT_TX | EVENT_CONFIG | EVENT_DIAGNOSTIC)
+            }) else {
                 self.buffer.clear();
                 return;
             };
@@ -132,6 +142,17 @@ impl Decoder {
                     });
                     self.buffer.drain(..2);
                 }
+                EVENT_DIAGNOSTIC => {
+                    if self.buffer.len() < 7 {
+                        return;
+                    }
+                    out.push(Event::Diagnostic {
+                        irq_status: u16::from_le_bytes([self.buffer[1], self.buffer[2]]),
+                        device_errors: u16::from_le_bytes([self.buffer[3], self.buffer[4]]),
+                        sync_word: [self.buffer[5], self.buffer[6]],
+                    });
+                    self.buffer.drain(..7);
+                }
                 _ => unreachable!("event marker selected above"),
             }
         }
@@ -153,6 +174,7 @@ mod tests {
         wire.extend_from_slice(&[EVENT_RX, 3, 0, 0xd8, 0xff, 9, 0, 1, 2, 3]);
         wire.extend_from_slice(&[EVENT_TX, 0, 3, 0]);
         wire.extend_from_slice(&[EVENT_CONFIG, 0]);
+        wire.extend_from_slice(&[EVENT_DIAGNOSTIC, 1, 2, 3, 4, 0x24, 0xb4]);
 
         let mut decoder = Decoder::new();
         let mut events = Vec::new();
@@ -172,6 +194,11 @@ mod tests {
                     frame_len: 3,
                 },
                 Event::Configured { result: 0 },
+                Event::Diagnostic {
+                    irq_status: 0x0201,
+                    device_errors: 0x0403,
+                    sync_word: [0x24, 0xb4],
+                },
             ]
         );
     }

@@ -60,6 +60,17 @@ pub struct Sx126x<SPI, IV, C: Sx126xVariant + Sized> {
     config: Config<C>,
 }
 
+/// Register-level SX126x state used to diagnose board integration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Diagnostics {
+    /// LoRa IRQ flags currently asserted by the radio.
+    pub irq_status: u16,
+    /// SX126x device-error flags.
+    pub device_errors: u16,
+    /// LoRa synchronization-word register bytes.
+    pub sync_word: [u8; 2],
+}
+
 impl<SPI, IV, C> Sx126x<SPI, IV, C>
 where
     SPI: SpiDevice<u8>,
@@ -74,6 +85,37 @@ where
 
     fn encode_sync_word(sync_word: u8) -> [u8; 2] {
         [((sync_word >> 4) << 4) | 0x04, ((sync_word & 0x0f) << 4) | 0x04]
+    }
+
+    async fn diagnostics(&mut self) -> Result<Diagnostics, RadioError> {
+        let mut irq_status = [0u8; 2];
+        self.intf
+            .read_with_status(&[OpCode::GetIrqStatus.value()], &mut irq_status)
+            .await?;
+
+        let mut device_errors = [0u8; 2];
+        self.intf
+            .read_with_status(&[OpCode::GetDeviceErrors.value()], &mut device_errors)
+            .await?;
+
+        let mut sync_word = [0u8; 2];
+        self.intf
+            .read(
+                &[
+                    OpCode::ReadRegister.value(),
+                    Register::LoRaSyncword.addr1(),
+                    Register::LoRaSyncword.addr2(),
+                    0,
+                ],
+                &mut sync_word,
+            )
+            .await?;
+
+        Ok(Diagnostics {
+            irq_status: u16::from_be_bytes(irq_status),
+            device_errors: u16::from_be_bytes(device_errors),
+            sync_word,
+        })
     }
 
     // Utility functions
@@ -178,6 +220,19 @@ where
 
         (steps_int << SX126X_PLL_STEP_SHIFT_AMOUNT)
             + (((steps_frac << SX126X_PLL_STEP_SHIFT_AMOUNT) + (SX126X_PLL_STEP_SCALED >> 1)) / SX126X_PLL_STEP_SCALED)
+    }
+}
+
+impl<SPI, IV, C, DLY> crate::LoRa<Sx126x<SPI, IV, C>, DLY>
+where
+    SPI: SpiDevice<u8>,
+    IV: InterfaceVariant,
+    C: Sx126xVariant,
+    DLY: DelayNs,
+{
+    /// Read register-level SX126x state without changing the logical radio mode.
+    pub async fn sx126x_diagnostics(&mut self) -> Result<Diagnostics, RadioError> {
+        self.radio_kind.diagnostics().await
     }
 }
 
