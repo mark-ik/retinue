@@ -6,14 +6,26 @@ Stream API (0x94 0xc3, big-endian u16 length). Collects the FromRadio frames the
 streams back and saves them raw. The field NUMBERS and wire TYPES are recorded; their
 application meanings are not asserted here.
 
-Usage: python capture_config.py COM7
+Usage: python capture_config.py COM7 [output.json] [label]
 """
-import json, sys, time
+import datetime
+import json
+import sys
+import time
 from pathlib import Path
 import serial
 
 PORT = sys.argv[1] if len(sys.argv) > 1 else "COM7"
+OUTPUT = (
+    Path(sys.argv[2])
+    if len(sys.argv) > 2
+    else Path(__file__).parent.parent / "tests" / "fixtures" / "meshtastic_config.json"
+)
+LABEL = sys.argv[3] if len(sys.argv) > 3 else "config"
 WANT_CONFIG_FIELD = 3  # discovered by empirical probe, not read from any schema
+
+if OUTPUT.exists():
+    raise SystemExit(f"refusing to overwrite existing capture: {OUTPUT}")
 
 
 def frame(pb):
@@ -61,17 +73,18 @@ s.close()
 frames = deframe(buf)
 print(f"captured {len(buf)} bytes, {len(frames)} FromRadio frames")
 
-out = Path(__file__).parent.parent / "tests" / "fixtures" / "meshtastic_config.json"
-out.write_text(
+OUTPUT.write_text(
     json.dumps(
         {
             "_comment": (
-                "Meshtastic-compatible device config stream, captured black-box 2026-07-22. "
+                "Meshtastic-compatible device config stream, captured black-box "
+                f"{datetime.date.today().isoformat()}. "
                 "want_config request = field 3 (discovered by empirically probing which field "
                 "number triggers a response; no schema was read). Stream API framing (0x94 0xc3 "
                 "+ BE u16 len). frames = the raw FromRadio payloads streamed back, hex. Field "
                 "NUMBERS/wire TYPES are observable facts; meanings are NOT asserted here."
             ),
+            "label": LABEL,
             "port": PORT,
             "want_config_field": WANT_CONFIG_FIELD,
             "frame_count": len(frames),
@@ -81,4 +94,4 @@ out.write_text(
     ),
     encoding="utf-8",
 )
-print(f"wrote {out}")
+print(f"wrote {OUTPUT}")

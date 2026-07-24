@@ -1,7 +1,8 @@
 //! Small protocol-facing composition of transport and application layers.
 
 use crate::application::{self, ApplicationEnvelope, ApplicationError, TEXT_PORT};
-use crate::transport::{ChannelKey, Header, Packet, TransportError};
+use crate::node_info::{NodeDirectory, OwnedUser};
+use crate::transport::{BROADCAST_DESTINATION, ChannelKey, Header, Packet, TransportError};
 
 /// One configured encrypted channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -15,6 +16,45 @@ pub struct Channel {
 pub struct ReceivedText {
     pub header: Header,
     pub text: String,
+}
+
+/// One packet endpoint, optionally resolved through observed node info.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedEndpoint<'a> {
+    pub number: u32,
+    pub user: Option<&'a OwnedUser>,
+}
+
+impl ResolvedEndpoint<'_> {
+    pub fn is_broadcast(self) -> bool {
+        self.number == BROADCAST_DESTINATION
+    }
+}
+
+/// A received message presented as source, destination, and text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedText<'a> {
+    pub from: ResolvedEndpoint<'a>,
+    pub to: ResolvedEndpoint<'a>,
+    pub text: &'a str,
+}
+
+impl ReceivedText {
+    /// Attach the latest observed names to this message's public transport
+    /// source and destination IDs.
+    pub fn resolve<'a>(&'a self, directory: &'a NodeDirectory) -> ResolvedText<'a> {
+        ResolvedText {
+            from: ResolvedEndpoint {
+                number: self.header.source,
+                user: directory.get(self.header.source),
+            },
+            to: ResolvedEndpoint {
+                number: self.header.destination,
+                user: directory.get(self.header.destination),
+            },
+            text: &self.text,
+        }
+    }
 }
 
 impl Channel {

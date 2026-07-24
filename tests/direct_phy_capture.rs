@@ -8,6 +8,8 @@ use sennet::application::{self, ApplicationEnvelope};
 use sennet::flood::{
     FloodDecision, FloodIgnore, ManagedFlood, ManagedFloodConfig, RelayDelayWindow,
 };
+use sennet::node::Channel;
+use sennet::node_info::NodeDirectory;
 use sennet::protobuf::{self, Reader, Value};
 use sennet::transport::{BROADCAST_DESTINATION, ChannelKey, Packet};
 use std::time::Duration;
@@ -45,6 +47,27 @@ const STOCK_CLIENT_RECEIPT: [u8; 78] = [
     0xcc, 0x96, 0x60, 0x6a, 0x45, 0x00, 0x00, 0xa0, 0x40, 0x48, 0x03, 0x60, 0xd5, 0xff, 0xff, 0xff,
     0xff, 0xff, 0xff, 0xff, 0xff, 0x01, 0x78, 0x03, 0x98, 0x01, 0x28, 0xa8, 0x01, 0x01,
 ];
+
+fn fixture_frames(name: &str) -> Vec<Vec<u8>> {
+    let path = format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"));
+    let text = std::fs::read_to_string(path).unwrap();
+    let start = text.find("\"frames\"").unwrap();
+    text[start..]
+        .split('"')
+        .filter(|value| {
+            value.len() >= 2
+                && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && value.len() % 2 == 0
+        })
+        .map(|hex| {
+            (0..hex.len())
+                .step_by(2)
+                .map(|index| u8::from_str_radix(&hex[index..index + 2], 16).unwrap())
+                .collect()
+        })
+        .filter(|frame: &Vec<u8>| !frame.is_empty())
+        .collect()
+}
 
 #[test]
 fn direct_phy_capture_decrypts_at_the_transport_boundary() {
@@ -166,4 +189,34 @@ fn stock_node_accepted_the_reconstructed_text_encoder() {
         application::decode_text(received_application).unwrap(),
         "sennet semantic api 0722"
     );
+}
+
+#[test]
+fn node_info_resolves_the_stock_rf_receipt_to_from_to_and_text() {
+    let mut directory = NodeDirectory::new();
+    for fixture in [
+        "meshtastic_nodeinfo_baseline_2026-07-23.json",
+        "meshtastic_nodeinfo_short_name_2026-07-23.json",
+    ] {
+        for frame in fixture_frames(fixture) {
+            directory.ingest_from_radio(&frame).unwrap();
+        }
+    }
+
+    let channel = Channel {
+        hash: 8,
+        key: PUBLIC_LONGFAST_KEY,
+    };
+    let received = channel.open_text(&RADIO_FRAME).unwrap().unwrap();
+    let resolved = received.resolve(&directory);
+
+    assert_eq!(resolved.from.number, 0xf66a_fa64);
+    assert_eq!(
+        resolved.from.user.unwrap().long_name,
+        "Sennet NodeInfo Alpha"
+    );
+    assert_eq!(resolved.from.user.unwrap().short_name, "SNIA");
+    assert!(resolved.to.is_broadcast());
+    assert_eq!(resolved.to.user, None);
+    assert_eq!(resolved.text, "tulle direct phy probe 0722");
 }

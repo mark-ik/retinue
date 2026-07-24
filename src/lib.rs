@@ -19,6 +19,7 @@
 pub mod application;
 pub mod flood;
 pub mod node;
+pub mod node_info;
 pub mod packet_id;
 pub mod protobuf;
 pub mod stream;
