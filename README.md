@@ -44,7 +44,10 @@ Honest about what is *not* done, so nobody deploys it expecting more:
 - **Interfaces**: TCP, the raw interface seam, and an optional Tulle packet-radio
   pump are implemented. RNode serial and direct-PHY USB framing remain owned by
   Tulle. A headed endpoint exchange through two RNode 1.86 radios now covers a
-  2 KiB reliable stream and a 4 KiB Resource byte-exactly. UDP is not implemented.
+  2 KiB reliable stream and a 4 KiB Resource byte-exactly. A second headed
+  exchange through the Tulle direct-PHY pair covers 4 KiB Resource publish and
+  fetch in both endpoint directions; see
+  `design_docs/2026-07-23_direct_phy_resource_acceptance.md`. UDP is not implemented.
 - **Radio MTU**: link MTU, reliable in-flight window, setup retry interval, and
   Resource request window are caller settings. Reliable chunks, Resource parts,
   advertisements, and hashmap updates derive their size from the selected link
@@ -72,9 +75,13 @@ Not affiliated with the Reticulum project.
 
 ## License
 
-Dual-licensed under either of
+Licensed under the Mozilla Public License, Version 2.0 ([LICENSE](LICENSE)).
 
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
+MPL-2.0 is file-level copyleft: you may use these crates in a larger work under
+any license, including a proprietary one, but modifications to *these files*
+must be published under the MPL. The intent is that the implementation stays
+shared — improvements to it come back — while anything built on top remains
+yours. It is also GPL-compatible, so these crates combine into the GPLv3
+firmware images this project ships.
 
-at your option. Contributions are accepted under the same terms.
+Contributions are accepted under the same terms.

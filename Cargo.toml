@@ -2,7 +2,7 @@
 name = "retinue"
 version = "0.0.1"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "MPL-2.0"
 repository = "https://github.com/mark-ik/retinue"
 description = "A Rust implementation of the Reticulum protocol: identity, announces, links, resources, and routing. The protocol is public domain; this is not the reference implementation (reticulum.network)."
 keywords = ["reticulum", "mesh", "networking", "p2p", "off-grid"]
@@ -137,6 +137,10 @@ required-features = ["tokio"]
 
 [[example]]
 name = "tulle_headed"
+required-features = ["tulle-radio"]
+
+[[example]]
+name = "direct_phy_resource"
 required-features = ["tulle-radio"]
 
 [[test]]

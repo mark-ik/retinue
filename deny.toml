@@ -1,14 +1,17 @@
 # cargo-deny configuration — the license gate.
 #
-# The load-bearing rule for retinue is that it and its whole dependency tree stay
-# permissively licensed (MIT / Apache-2.0 and friends). A single copyleft dependency here
-# would force any firmware that statically links retinue to become GPLv3, which is exactly
-# the boundary the embedded strategy depends on keeping clean. See
-# design_docs/2026-07-19_modem_embedded_and_meshtastic_research.md.
+# retinue is licensed MPL-2.0 (see LICENSE), as are its sibling radio crates (tulle, tucket,
+# sennet). MPL is *file-level* copyleft: modifications to these files must be published, but
+# the crates remain consumable by larger works under other licenses, and they flow cleanly
+# into the GPLv3 firmware images the product ships. See the licensing ruling in
+# design_docs/2026-07-20_mesh_household_tulle_tucket_sennet.md.
 #
-# This file drives `cargo deny check licenses` in CI: any license not on the allow list
-# below — every GPL/LGPL/AGPL variant, MPL, etc. — fails the build, so the boundary cannot
-# erode by accident (including through a transitive dependency).
+# The load-bearing rule this file enforces is about the DEPENDENCY tree: it must stay free of
+# strong copyleft. A GPL/LGPL/AGPL dependency would relicense any firmware or application that
+# links retinue, which is the boundary the whole embedded and licensing strategy rests on.
+#
+# `cargo deny check licenses` runs this in CI: any license not on the allow list below fails
+# the build, so the boundary cannot erode by accident through a transitive dependency.
 
 [graph]
 # Check optional dependencies too (tokio, getrandom, bzip2), so nothing hides behind a
@@ -17,20 +20,18 @@ all-features = true
 
 [licenses]
 version = 2
-# Exactly the permissive licenses currently in the tree — kept tight on purpose. A new
-# dependency that introduces any other license fails this check, forcing a review:
+# Exactly the licenses currently in the tree — kept tight on purpose. A new dependency that
+# introduces any other license fails this check, forcing a review:
 #
 #   * A permissive one (ISC, BSD-2-Clause, Zlib, ...) is a one-line, reviewed addition here.
-#   * GPL/LGPL/AGPL is the hard red line: it is viral, so it would relicense any firmware
-#     image that statically links retinue to (A)GPL. Never add it.
-#   * MPL-2.0 is only *file-level* copyleft — it would NOT relicense the combined image, just
-#     keep the MPL files themselves under MPL — so it is not the GPL hazard. retinue still
-#     stays MPL-free by policy (it carries no Servo-derived code); MPL lives in genet, whose
-#     stylo/Servo lineage makes it MPL by design. So MPL is excluded here as convention, not
-#     because it is dangerous to combine.
+#   * GPL/LGPL/AGPL is the hard red line: strong copyleft would relicense any firmware image
+#     or application that links retinue. Never add it.
+#   * MPL-2.0 is allowed: it is what retinue and its siblings are licensed under, and its
+#     file-level scope does not relicense a combined work.
 #
 # bzip2-1.0.6 is the permissive bzlib license.
 allow = [
+    "MPL-2.0",
     "MIT",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",

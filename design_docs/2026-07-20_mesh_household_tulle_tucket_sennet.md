@@ -124,9 +124,18 @@ accordingly:
   and reimplement without hesitation. The app-schema layer gets a hand-rolled
   codec for exactly the supported messages, written from wire captures and
   public prose, never from the `.proto` files and never via `protoc` on them.
-  Counsel reviews the schema-reconstruction provenance before permissive
-  publication. Asking upstream to dual-license the schemas is a cheap parallel
-  move that would dissolve the whole hazard.
+  The provenance record is the defense and must keep pace with the code (see
+  sennet's `PROVENANCE.md`).
+
+  **Asking upstream to dual-license is dead — superseded 2026-07-23.** It has
+  been asked, publicly, more than once, and refused: meshtastic/protobufs #695
+  ("Convert to MIT") closed not-planned with "GPL V3 leaves a nice level playing
+  field"; #703 asked directly whether license exceptions are granted and got "We
+  do not, as you know"; #712 restated "we are not re-licensing to MIT". Do not
+  re-ask. Note the refusals concern *copying their `.proto`*, which Sennet never
+  does — a license you do not need cannot be withheld. Expect scrutiny anyway
+  (there is active violation-hunting in that community), so the provenance record
+  must be the front door, not an appendix.
 - **Personality flipping:** one radio speaks one protocol at a time. ESP32-S3
   boards (Heltec V4, 8MB flash, A/B partitions) can hold dual personalities and
   flip remotely; nRF52840 (T114, 1MB flash) flips by local reflash only. The
@@ -147,13 +156,27 @@ Considered and decided after reviewing the GPLv3 vibe of comparable projects
 (embedded Reticulum efforts, Sideband/NomadNet/RNode all GPL at the app or
 firmware layer):
 
-1. **All four crates stay MIT OR Apache-2.0.** MPL-2.0 for retinue/tulle was
-   evaluated (file-level share-alike, static-link clean, would keep the
-   implementation uncapturable) and declined for consistency: tucket must match
-   MIT upstream and sennet's reason to exist is being the permissive
-   Meshtastic-compatible implementation, so the whole household stays uniform.
-   GPL at the library root is wrong regardless: these crates sit at the base of
-   a permissive ecosystem, and copyleft only flows upward from there.
+1. ~~**All four crates stay MIT OR Apache-2.0.**~~ **REVERSED 2026-07-23: all
+   four crates are MPL-2.0.** The original call kept the household uniform on
+   MIT/Apache. What changed it was reading Meshtastic's own stated reason for
+   refusing to relicense (protobufs #695): GPL exists there to stop large
+   companies taking the work without contributing back. Taken seriously, that
+   argument indicts a *permissive* independent reimplementation — an MIT Sennet
+   would be a clean legal route around a copyleft its authors chose
+   deliberately, which is a free ride on someone else's principle. MPL-2.0 shuts
+   that door without closing the crate: file-level share-alike means
+   improvements to *these files* must be published, while anything built on top
+   stays the builder's, under any license. Mark extended it to the whole
+   household ("the work we do will make it worth it for tulle and tucket too"),
+   which also protects the implementations from being forked closed.
+   Consequences: MPL is GPL-compatible, so the crates still flow into the GPLv3
+   firmware images (point 2); MPL is consumable by mere/merecat unchanged; GPL
+   at the library root remains wrong for the same reason as before. **Never put
+   MPL Exhibit B ("Incompatible With Secondary Licenses") in a source file** —
+   that would break GPL compatibility and the firmware plan. Use Exhibit A.
+   tucket retains MeshCore's MIT notice in `NOTICE` (MIT permits relicensing a
+   derivative but requires the original notice be kept). retinue's `deny.toml`
+   was inverted to match: MPL-2.0 allowed, strong copyleft still the red line.
 2. **Firmware images are GPLv3.** The flashable artifact (the retinue-derived
    ESP32/nRF images, and v1's stock RNode firmware) is where GPLv3's teeth
    matter: the installation-information clause means nobody ships a locked
