@@ -1,0 +1,46 @@
+[package]
+name = "tulle"
+version = "0.0.1"
+edition = "2024"
+description = "Shared radio interface layer for LoRa mesh stacks: serial modem control, direct PHY, and medium access."
+license = "MPL-2.0"
+repository = "https://github.com/mark-ik/tulle"
+readme = "README.md"
+keywords = ["lora", "radio", "mesh", "rnode", "reticulum"]
+categories = ["network-programming", "embedded"]
+
+[profile.release]
+debug = 2
+lto = true
+opt-level = "s"
+codegen-units = 1
+
+[workspace]
+members = [".", "crates/phy-profile", "firmware/heltec-v4-phy", "firmware/t114-phy"]
+default-members = [".", "crates/phy-profile"]
+resolver = "2"
+
+[features]
+default = []
+serial-async = ["dep:serial2-tokio", "dep:tokio"]
+
+[dependencies]
+serial2-tokio = { version = "0.1.24", optional = true }
+tokio = { version = "1.53.1", features = ["io-util", "rt", "sync", "time"], optional = true }
+tulle-phy-profile = { path = "crates/phy-profile" }
+
+[dev-dependencies]
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["io-util", "macros", "rt", "sync", "time"] }
+
+[[example]]
+name = "rnode_smoke"
+required-features = ["serial-async"]
+
+[[example]]
+name = "rnode_roundtrip"
+required-features = ["serial-async"]
+
+[[example]]
+name = "rnode_mtu"
+required-features = ["serial-async"]

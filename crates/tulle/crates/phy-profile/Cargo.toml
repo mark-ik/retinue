@@ -1,0 +1,9 @@
+[package]
+name = "tulle-phy-profile"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Clean-room LoRa PHY profiles shared by Tulle host and embedded code."
+
+[lib]
+path = "src/lib.rs"
