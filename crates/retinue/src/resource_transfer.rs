@@ -69,8 +69,7 @@ impl ResourceSender {
         let mtu = link.mtu() as usize;
         let mut hash_window = out
             .total_parts()
-            .min(crate::resource::HASHMAP_MAX_PARTS)
-            .max(1);
+            .clamp(1, crate::resource::HASHMAP_MAX_PARTS);
         while hash_window > 1 {
             let packed = out.advertisement_with_hash_limit(hash_window).pack();
             let probe = link.sealed_packet(CTX_RESOURCE_ADV, &packed, &[0_u8; IV_LEN]);

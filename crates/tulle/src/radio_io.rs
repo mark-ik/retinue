@@ -25,6 +25,10 @@ pub trait PacketRadio {
     fn recv_frame(&mut self) -> impl Future<Output = Option<Received>> + Send;
 }
 
+// The explicit `impl Future + Send` mirrors the trait's own signature, which needs
+// the `Send` bound spelled out for callers that spawn these futures. Rewriting the
+// impls as `async fn` would hide the bound the trait exists to guarantee.
+#[allow(clippy::manual_async_fn)]
 impl PacketRadio for RNodeSerialLink {
     fn max_frame_len(&self) -> usize {
         crate::rnode::MAX_FRAME
@@ -42,6 +46,7 @@ impl PacketRadio for RNodeSerialLink {
     }
 }
 
+#[allow(clippy::manual_async_fn)]
 impl PacketRadio for DirectPhySerialLink {
     fn max_frame_len(&self) -> usize {
         DIRECT_PHY_MAX_FRAME

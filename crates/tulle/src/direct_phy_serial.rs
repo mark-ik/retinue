@@ -190,6 +190,11 @@ impl Drop for DirectPhySerialLink {
     }
 }
 
+// The pump owns the whole direct-PHY state machine: the io handle, the radio
+// parameters it was configured with, the airtime budget it must respect, and both
+// ends of the channel pair. Bundling them into a struct would only move the
+// argument list one level out.
+#[allow(clippy::too_many_arguments)]
 async fn run_pump<T>(
     mut io: T,
     profile: PhyProfile,
@@ -411,12 +416,12 @@ where
                 }
             }
             _ = sleep_until(wake_at) => {
-                if in_flight.as_ref().is_some_and(|sent| sent.deadline <= Instant::now()) {
-                    if let Some(sent) = in_flight.take() {
-                        let _ = sent.request.done.send(Err(TransmitError::Transport(
-                            "direct-PHY transmit acknowledgement timed out".to_string(),
-                        )));
-                    }
+                if in_flight.as_ref().is_some_and(|sent| sent.deadline <= Instant::now())
+                    && let Some(sent) = in_flight.take()
+                {
+                    let _ = sent.request.done.send(Err(TransmitError::Transport(
+                        "direct-PHY transmit acknowledgement timed out".to_string(),
+                    )));
                 }
                 if retry_at.is_some_and(|retry| retry <= Instant::now()) {
                     retry_at = None;

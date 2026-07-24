@@ -31,8 +31,13 @@ jobs:
       # The sans-io core (codec, framing, links, resources, channel/buffer, proofs)
       # must stand alone without the tokio runtime. Examples and endpoint tests are
       # gated by required-features, so this builds and tests only that core.
-      - name: Test (no default features)
-        run: cargo test --no-default-features
+      - name: Test (retinue, no default features)
+        run: cargo test -p retinue --no-default-features
+
+      # The other host stacks have their own sans-io cores: sennet and tucket must
+      # both stand without the `hardware` feature that pulls tulle's serial runtime.
+      - name: Test (sennet and tucket, no default features)
+        run: cargo test -p sennet -p tucket --no-default-features
 
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
@@ -42,7 +47,22 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-  # Enforce that retinue's whole dependency tree stays permissively licensed. A copyleft
+  # The firmware members build for their own targets and are not default members, so
+  # the host jobs above never compile them. This guards the flash-critical path: a
+  # workspace-wide dependency bump that breaks the embedded build should fail here,
+  # not on a bench with a cable in hand. The esp32s3 target (heltec-v4-phy) needs the
+  # espup toolchain and stays a local build.
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: thumbv7em-none-eabihf
+      - name: Build (t114 phy)
+        run: cargo build -p tulle-t114-phy --release --target thumbv7em-none-eabihf
+
+  # Enforce that the whole dependency tree stays permissively licensed. A copyleft
   # dependency would force any firmware that links retinue to GPLv3 (see deny.toml and the
   # embedded/licensing research note), so this gate fails the build if one ever enters.
   licenses:
@@ -53,6 +73,7 @@ jobs:
         with:
           command: check licenses
 
-# The RNS interoperability oracle (oracle/) needs a Python venv and is not run here;
-# the bytes it produced are checked in under tests/fixtures/, so the gold tests that
-# pin the wire run in CI against those fixtures with no Python.
+# The RNS interoperability oracle (crates/retinue/oracle/) needs a Python venv and is
+# not run here; the bytes it produced are checked in under crates/retinue/tests/fixtures/,
+# so the gold tests that pin the wire run in CI against those fixtures with no Python.
+# Sennet's Meshtastic capture tooling (crates/sennet/capture/) works the same way.

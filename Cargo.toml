@@ -2,9 +2,21 @@
 resolver = "2"
 members = [
     "crates/retinue",
+    "crates/tulle",
+    "crates/phy-profile",
+    "crates/sennet",
+    "crates/tucket",
+    "firmware/heltec-v4-phy",
+    "firmware/t114-phy",
 ]
+# Firmware targets thumbv7em/xtensa and is built by name, not by default:
+#   cargo build -p tulle-t114-phy --release --target thumbv7em-none-eabihf
 default-members = [
     "crates/retinue",
+    "crates/tulle",
+    "crates/phy-profile",
+    "crates/sennet",
+    "crates/tucket",
 ]
 
 # Inherited from the tulle workspace at the 2026-07-23 radio-family merge, and

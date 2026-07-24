@@ -43,6 +43,8 @@ fn radio_pair(max_frame_len: usize) -> (MemoryRadio, MemoryRadio) {
     )
 }
 
+// Mirrors the trait's explicit `impl Future + Send`, as tulle's own impls do.
+#[allow(clippy::manual_async_fn)]
 impl PacketRadio for MemoryRadio {
     fn max_frame_len(&self) -> usize {
         self.max_frame_len

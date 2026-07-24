@@ -82,8 +82,8 @@ impl Header {
         out[4..8].copy_from_slice(&self.source.to_le_bytes());
         out[8..12].copy_from_slice(&self.packet_id.to_le_bytes());
         out[12] = self.hop_limit
-            | u8::from(self.want_ack) * WANT_ACK_MASK
-            | u8::from(self.via_mqtt) * VIA_MQTT_MASK
+            | (u8::from(self.want_ack) * WANT_ACK_MASK)
+            | (u8::from(self.via_mqtt) * VIA_MQTT_MASK)
             | self.hop_start << HOP_START_SHIFT;
         out[13] = self.channel_hash;
         out[14] = self.next_hop;
